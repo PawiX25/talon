@@ -190,12 +190,6 @@ export function recordUsage(
     cacheWrite: number;
     durationMs?: number;
     model?: string;
-    /** Actual context fill from the last API call (last iteration's prompt tokens). */
-    contextTokens?: number;
-    /** Model context window size from SDK modelUsage. */
-    contextWindow?: number;
-    /** Number of agentic turns / API round-trips in this turn. */
-    numApiCalls?: number;
     costUsd?: number;
   },
 ): void {
@@ -207,20 +201,20 @@ export function recordUsage(
   session.usage.totalCacheWrite += turn.cacheWrite;
   session.usage.lastPromptTokens =
     turn.inputTokens + turn.cacheRead + turn.cacheWrite;
-  // Context info from SDK
-  session.usage.contextTokens = turn.contextTokens ?? 0;
-  if (
-    turn.contextWindow !== undefined &&
-    Number.isFinite(turn.contextWindow) &&
-    turn.contextWindow > 0
-  ) {
-    session.usage.contextWindow = turn.contextWindow;
-  }
-  session.usage.numApiCalls = turn.numApiCalls ?? 0;
-  // Add backend-reported cost when available
+  // Prefer backend-reported cost when available; otherwise fall back to
+  // Claude-era model pricing heuristics.
   if (typeof turn.costUsd === "number" && Number.isFinite(turn.costUsd)) {
     session.usage.estimatedCostUsd += turn.costUsd;
+  } else {
+    const pricing = getPricing(turn.model);
+    session.usage.estimatedCostUsd +=
+      (turn.inputTokens * pricing.input +
+        turn.cacheWrite * pricing.cacheWrite +
+        turn.cacheRead * pricing.cacheRead +
+        turn.outputTokens * pricing.output) /
+      1_000_000;
   }
+  // Track which model was last used
   if (turn.model) session.lastModel = turn.model;
   // Response time tracking
   if (turn.durationMs && turn.durationMs > 0) {

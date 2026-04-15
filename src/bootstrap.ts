@@ -122,35 +122,8 @@ export async function initBackendAndDispatcher(
   if (config.backend === "opencode") {
     const { initOpenCodeAgent, handleMessage: opencodeHandleMessage } =
       await import("./backend/opencode/index.js");
-    const ocModelProvider =
-      await import("./backend/opencode/model-provider.js");
     initOpenCodeAgent(config, frontend.getBridgePort, frontend.name);
-    backend = {
-      query: (params) => opencodeHandleMessage(params),
-      resolveModel: (q) => ocModelProvider.resolveModel(q),
-      getModelInfo: (id) => ocModelProvider.getModelInfo(id),
-      getSettingsPresentation: (m, prefix) =>
-        ocModelProvider.getSettingsPresentation(m, prefix),
-      getProviders: () => ocModelProvider.getProviders(),
-      getProviderModels: (p, pg, ps) =>
-        ocModelProvider.getProviderModels(p, pg, ps),
-      formatModelError: (q, r) => ocModelProvider.formatModelError(q, r),
-      listModels: (f) => ocModelProvider.listModels(f),
-      backendLabel: "OpenCode",
-      getSessionSnapshot: async (sessionId) => {
-        const { getOpenCodeSessionSnapshot } =
-          await import("./backend/opencode/index.js");
-        const snap = await getOpenCodeSessionSnapshot(sessionId);
-        if (!snap) return undefined;
-        return {
-          inputTokens: snap.usage?.totalInputTokens,
-          outputTokens: snap.usage?.totalOutputTokens,
-          cacheRead: snap.usage?.totalCacheRead,
-          cacheWrite: snap.usage?.totalCacheWrite,
-          contextModelId: snap.assistant?.modelID,
-        };
-      },
-    };
+    backend = { query: (params) => opencodeHandleMessage(params) };
     log("bot", "Backend: OpenCode");
   } else {
     const {

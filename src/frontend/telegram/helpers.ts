@@ -196,28 +196,14 @@ export function renderSettingsText(
   return [
     "<b>\uD83E\uDD85 Settings</b>",
     "",
-    `<b>Model:</b> <code>${escapeHtml(formatModelLabel(model))}</code>`,
+    `<b>Model:</b> <code>${escapeHtml(model)}</code>`,
     ...(modelDetails?.length ? modelDetails : []),
     `<b>Effort:</b> ${effort}`,
     `<b>Pulse:</b> ${proactive ? "on" : "off"} (every ${intervalStr})`,
   ].join("\n");
 }
 
-export function isSelectedModel(
-  currentModel: string,
-  modelId: string,
-): boolean {
-  const current = resolveModel(currentModel);
-  const candidate = resolveModel(modelId);
-  if (current && candidate) {
-    return (
-      current.displayName.toLowerCase() === candidate.displayName.toLowerCase()
-    );
-  }
-  return resolveModelId(currentModel) === modelId;
-}
-
-export type SettingsButton = { text: string; callback_data: string };
+type SettingsButton = { text: string; callback_data: string };
 
 export function renderSettingsKeyboard(
   model: string,
@@ -225,24 +211,35 @@ export function renderSettingsKeyboard(
   proactive: boolean,
   modelButtons?: Array<SettingsButton>,
 ): Array<Array<SettingsButton>> {
-  const selectedButtons = modelButtons?.length
-    ? modelButtons
-    : getTelegramModelOptions().map((m) => ({
-        text: isSelectedModel(model, m.id)
-          ? `\u2713 ${formatCompactModelLabel(m)}`
-          : formatCompactModelLabel(m),
-        callback_data: `settings:model:${m.id}`,
-      }));
-  const cols = modelButtons?.length ? 2 : 3;
+  const isModel = (id: string) => model.includes(id);
+  const defaultModelButtons: Array<SettingsButton> = [
+    {
+      text: isModel("sonnet") ? "✓ Sonnet" : "Sonnet",
+      callback_data: "settings:model:sonnet",
+    },
+    {
+      text: isModel("opus") ? "✓ Opus" : "Opus",
+      callback_data: "settings:model:opus",
+    },
+    {
+      text: isModel("haiku") ? "✓ Haiku" : "Haiku",
+      callback_data: "settings:model:haiku",
+    },
+  ];
+
+  const selectedModelButtons = (modelButtons?.length ? modelButtons : defaultModelButtons).map(
+    (button) => ({ ...button }),
+  );
   const modelRows: Array<Array<SettingsButton>> = [];
-  for (let i = 0; i < selectedButtons.length; i += cols) {
-    modelRows.push(selectedButtons.slice(i, i + cols));
+  for (let index = 0; index < selectedModelButtons.length; index += 2) {
+    modelRows.push(selectedModelButtons.slice(index, index + 2));
   }
+
   return [
     ...modelRows,
     [
       {
-        text: effort === "low" ? "\u2713 Low" : "Low",
+        text: effort === "low" ? "✓ Low" : "Low",
         callback_data: "settings:effort:low",
       },
       {

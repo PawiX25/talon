@@ -1198,10 +1198,6 @@ async function reuseExistingServer(): Promise<OpencodeClient | null> {
   }
 }
 
-async function registerMcpServer(oc: OpencodeClient): Promise<void> {
-  await ensureChatMcpServer(oc, "default");
-}
-
 async function ensureChatMcpServer(
   oc: OpencodeClient,
   chatId: string,

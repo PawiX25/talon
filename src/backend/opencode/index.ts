@@ -218,12 +218,10 @@ type OpenCodeUsageSummary = {
   costUsd: number;
 };
 
-let modelCatalogCache:
-  | {
-      expiresAt: number;
-      value: OpenCodeModelCatalog;
-    }
-  | null = null;
+let modelCatalogCache: {
+  expiresAt: number;
+  value: OpenCodeModelCatalog;
+} | null = null;
 
 function createStrictOpencodeClient(baseUrl: string): OpencodeClient {
   return createOpencodeClient({
@@ -262,9 +260,10 @@ function getBucketPriority(bucketName: string): number {
   }
 }
 
-function extractPartsSummary(
-  parts: Array<Record<string, unknown>>,
-): { text: string; toolCalls: number } {
+function extractPartsSummary(parts: Array<Record<string, unknown>>): {
+  text: string;
+  toolCalls: number;
+} {
   const textParts: string[] = [];
   let toolCalls = 0;
 
@@ -286,9 +285,10 @@ function normalizeModelLookup(value: string): string {
   return value.trim().toLowerCase().replace(/[`"']/g, "").replace(/\s+/g, "-");
 }
 
-function parseOpenCodeModelQuery(
-  value: string,
-): { providerQuery?: string; modelQuery: string } {
+function parseOpenCodeModelQuery(value: string): {
+  providerQuery?: string;
+  modelQuery: string;
+} {
   const trimmed = value.trim();
   const slashIndex = trimmed.indexOf("/");
   const colonIndex = trimmed.indexOf(":");
@@ -310,9 +310,10 @@ function parseOpenCodeModelQuery(
   return { providerQuery, modelQuery };
 }
 
-function parseStoredOpenCodeModelSelection(
-  value: string,
-): { providerID?: string; modelID: string } {
+function parseStoredOpenCodeModelSelection(value: string): {
+  providerID?: string;
+  modelID: string;
+} {
   const { providerQuery, modelQuery } = parseOpenCodeModelQuery(value);
   return {
     providerID: providerQuery ? normalizeModelLookup(providerQuery) : undefined,
@@ -488,21 +489,30 @@ function buildModelCatalog(
   const defaultModels = providersData.default ?? {};
   const providers = (Array.isArray(providersData.all) ? providersData.all : [])
     .map((rawProvider) =>
-      parseCatalogProvider(rawProvider, connectedProviders, defaultModels, authMap),
+      parseCatalogProvider(
+        rawProvider,
+        connectedProviders,
+        defaultModels,
+        authMap,
+      ),
     )
-    .filter(
-      (provider): provider is OpenCodeProviderCatalogEntry => Boolean(provider),
+    .filter((provider): provider is OpenCodeProviderCatalogEntry =>
+      Boolean(provider),
     )
     .sort((left, right) => {
       if (left.connected !== right.connected) return left.connected ? -1 : 1;
       return left.name.localeCompare(right.name);
     });
 
-  const providerById = new Map(providers.map((provider) => [provider.id, provider]));
+  const providerById = new Map(
+    providers.map((provider) => [provider.id, provider]),
+  );
   const models: Array<OpenCodeModelCatalogEntry> = [];
 
   for (const rawProvider of providersData.all ?? []) {
-    const provider = rawProvider.id ? providerById.get(rawProvider.id) : undefined;
+    const provider = rawProvider.id
+      ? providerById.get(rawProvider.id)
+      : undefined;
     if (!provider) continue;
 
     for (const rawModel of Object.values(rawProvider.models ?? {})) {
@@ -520,7 +530,9 @@ function buildModelCatalog(
     connectedProviders: providers.filter((provider) => provider.connected),
     loginProviders: providers.filter((provider) => provider.loginRequired),
     connectedModels: models.filter((model) => model.selectable),
-    connectedFreeModels: models.filter((model) => model.selectable && model.free),
+    connectedFreeModels: models.filter(
+      (model) => model.selectable && model.free,
+    ),
   };
 }
 
@@ -543,13 +555,16 @@ export async function getOpenCodeModelCatalog(
   ]);
 
   const providersData =
-    (providersResp.data as {
-      all?: Array<OpenCodeRawProvider>;
-      connected?: Array<string>;
-      default?: Record<string, string>;
-    } | undefined) ?? {};
+    (providersResp.data as
+      | {
+          all?: Array<OpenCodeRawProvider>;
+          connected?: Array<string>;
+          default?: Record<string, string>;
+        }
+      | undefined) ?? {};
   const authMap =
-    (authResp.data as Record<string, Array<OpenCodeAuthMethod>> | undefined) ?? {};
+    (authResp.data as Record<string, Array<OpenCodeAuthMethod>> | undefined) ??
+    {};
 
   const catalog = buildModelCatalog(providersData, authMap);
   modelCatalogCache = {
@@ -597,7 +612,10 @@ function getSearchCandidates(
   return matches.sort((left, right) => {
     if (normalizedProvider) {
       const leftProviderExact = hasProviderExactMatch(left, normalizedProvider);
-      const rightProviderExact = hasProviderExactMatch(right, normalizedProvider);
+      const rightProviderExact = hasProviderExactMatch(
+        right,
+        normalizedProvider,
+      );
       if (leftProviderExact !== rightProviderExact) {
         return leftProviderExact ? -1 : 1;
       }
@@ -627,19 +645,19 @@ export function resolveOpenCodeModelInput(
   const normalizedProvider = providerQuery
     ? normalizeModelLookup(providerQuery)
     : undefined;
-  const exactMatches = matches.filter(
-    (model) => {
-      const exactModelMatch =
-        normalizeModelLookup(model.id) === normalizedModel ||
-        normalizeModelLookup(model.name) === normalizedModel;
-      if (!exactModelMatch) return false;
+  const exactMatches = matches.filter((model) => {
+    const exactModelMatch =
+      normalizeModelLookup(model.id) === normalizedModel ||
+      normalizeModelLookup(model.name) === normalizedModel;
+    if (!exactModelMatch) return false;
 
-      return normalizedProvider
-        ? hasProviderExactMatch(model, normalizedProvider)
-        : true;
-    },
+    return normalizedProvider
+      ? hasProviderExactMatch(model, normalizedProvider)
+      : true;
+  });
+  const selectableExactMatches = exactMatches.filter(
+    (model) => model.selectable,
   );
-  const selectableExactMatches = exactMatches.filter((model) => model.selectable);
 
   if (exactMatches.length === 1) {
     return { kind: "exact", model: exactMatches[0] };
@@ -657,7 +675,9 @@ export function resolveOpenCodeModelInput(
 }
 
 function isCallbackSafeModelID(modelID: string): boolean {
-  return modelID.length <= 48 && !modelID.includes(":") && !modelID.includes("/");
+  return (
+    modelID.length <= 48 && !modelID.includes(":") && !modelID.includes("/")
+  );
 }
 
 export function getOpenCodeQuickPickModels(
@@ -668,7 +688,8 @@ export function getOpenCodeQuickPickModels(
   const seen = new Set<string>();
 
   const tryAdd = (model: OpenCodeModelCatalogEntry | undefined) => {
-    if (!model || seen.has(model.id) || !isCallbackSafeModelID(model.id)) return;
+    if (!model || seen.has(model.id) || !isCallbackSafeModelID(model.id))
+      return;
     picks.push(model);
     seen.add(model.id);
   };
@@ -697,9 +718,7 @@ export function getOpenCodeQuickPickModels(
   return picks;
 }
 
-function extractAssistantUsage(
-  info: OpenCodeAssistantInfo | undefined,
-): {
+function extractAssistantUsage(info: OpenCodeAssistantInfo | undefined): {
   inputTokens: number;
   outputTokens: number;
   cacheRead: number;
@@ -722,11 +741,11 @@ function extractAssistantUsage(
 function hasAssistantUsage(info: OpenCodeAssistantInfo | undefined): boolean {
   return Boolean(
     info?.tokens?.input ||
-      info?.tokens?.output ||
-      info?.tokens?.reasoning ||
-      info?.tokens?.cache?.read ||
-      info?.tokens?.cache?.write ||
-      info?.cost,
+    info?.tokens?.output ||
+    info?.tokens?.reasoning ||
+    info?.tokens?.cache?.read ||
+    info?.tokens?.cache?.write ||
+    info?.cost,
   );
 }
 
@@ -761,11 +780,13 @@ function parseAssistantMessage(
   };
 }
 
-function isMeaningfulAssistantMessage(message: ParsedAssistantMessage): boolean {
+function isMeaningfulAssistantMessage(
+  message: ParsedAssistantMessage,
+): boolean {
   return Boolean(
     message.parts.length > 0 ||
-      message.info?.time?.completed ||
-      hasAssistantUsage(message.info),
+    message.info?.time?.completed ||
+    hasAssistantUsage(message.info),
   );
 }
 
@@ -782,7 +803,8 @@ export function summarizeOpenCodeAssistantMessages(
     .filter((message): message is ParsedAssistantMessage => Boolean(message))
     .filter(
       (message) =>
-        message.createdAt >= minCreatedAt && isMeaningfulAssistantMessage(message),
+        message.createdAt >= minCreatedAt &&
+        isMeaningfulAssistantMessage(message),
     );
 
   for (const assistant of assistants) {
@@ -1028,12 +1050,14 @@ export async function getOpenCodeSessionSnapshot(
   ]);
 
   const sessionInfo =
-    (sessionResp.data as {
-      time?: {
-        created?: number;
-        updated?: number;
-      };
-    } | undefined) ?? {};
+    (sessionResp.data as
+      | {
+          time?: {
+            created?: number;
+            updated?: number;
+          };
+        }
+      | undefined) ?? {};
   const summary = summarizeOpenCodeAssistantMessages(messages);
   const latestAssistant = summary.latestAssistant;
   const usage = extractAssistantUsage(latestAssistant?.info);
@@ -1217,7 +1241,8 @@ async function ensureChatMcpServer(
   try {
     const statusResp = await oc.mcp.status();
     const mcpServers =
-      (statusResp.data as Record<string, { status?: string }> | undefined) ?? {};
+      (statusResp.data as Record<string, { status?: string }> | undefined) ??
+      {};
     const talonTools = mcpServers[serverName];
 
     if (talonTools?.status === "connected") {
@@ -1376,11 +1401,11 @@ export async function handleMessage(
     const resp = await waitForPromptWithQuestionGuard(
       oc,
       {
-      sessionID: sessionId,
-      parts: [{ type: "text" as const, text: prompt }],
-      model: { providerID, modelID },
-      system: config.systemPrompt + OPENCODE_SYSTEM_PROMPT_SUFFIX,
-      ...(toolOverrides ? { tools: toolOverrides } : {}),
+        sessionID: sessionId,
+        parts: [{ type: "text" as const, text: prompt }],
+        model: { providerID, modelID },
+        system: config.systemPrompt + OPENCODE_SYSTEM_PROMPT_SUFFIX,
+        ...(toolOverrides ? { tools: toolOverrides } : {}),
       },
       chatId,
       seenQuestionIds,
@@ -1410,7 +1435,11 @@ export async function handleMessage(
       assistantInfo = fallbackReply.info ?? assistantInfo;
     }
 
-    const turnSummary = await getOpenCodeTurnSummary(oc, sessionId, promptStartedAt);
+    const turnSummary = await getOpenCodeTurnSummary(
+      oc,
+      sessionId,
+      promptStartedAt,
+    );
     const fallbackUsage = extractAssistantUsage(assistantInfo);
     const usage =
       turnSummary.usage.assistantMessages > 0
@@ -1421,9 +1450,11 @@ export async function handleMessage(
             cacheWrite: turnSummary.usage.cacheWrite,
             costUsd: turnSummary.usage.costUsd,
             providerID:
-              turnSummary.latestAssistant?.info?.providerID ?? fallbackUsage.providerID,
+              turnSummary.latestAssistant?.info?.providerID ??
+              fallbackUsage.providerID,
             modelID:
-              turnSummary.latestAssistant?.info?.modelID ?? fallbackUsage.modelID,
+              turnSummary.latestAssistant?.info?.modelID ??
+              fallbackUsage.modelID,
           }
         : fallbackUsage;
 

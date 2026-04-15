@@ -81,9 +81,9 @@ export function renderSettingsKeyboard(
     },
   ];
 
-  const selectedModelButtons = (modelButtons?.length ? modelButtons : defaultModelButtons).map(
-    (button) => ({ ...button }),
-  );
+  const selectedModelButtons = (
+    modelButtons?.length ? modelButtons : defaultModelButtons
+  ).map((button) => ({ ...button }));
   const modelRows: Array<Array<SettingsButton>> = [];
   for (let index = 0; index < selectedModelButtons.length; index += 2) {
     modelRows.push(selectedModelButtons.slice(index, index + 2));

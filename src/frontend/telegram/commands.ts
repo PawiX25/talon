@@ -100,9 +100,9 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
         "",
         "<b>\uD83E\uDD85 Settings</b>",
         "  /settings -- view and change all chat settings",
-          config.backend === "opencode"
-            ? "  /model -- browse/change OpenCode models (free + login info)"
-            : "  /model -- show or change model (sonnet, opus, haiku)",
+        config.backend === "opencode"
+          ? "  /model -- browse/change OpenCode models (free + login info)"
+          : "  /model -- show or change model (sonnet, opus, haiku)",
         "  /effort -- set thinking effort (off, low, medium, high, max)",
         "  /pulse -- toggle periodic check-ins (on/off)",
         "",
@@ -200,7 +200,10 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
 
     if (config.backend === "opencode") {
       if (!arg) {
-        const summary = await renderOpenCodeModelSummary(activeModel, config.model);
+        const summary = await renderOpenCodeModelSummary(
+          activeModel,
+          config.model,
+        );
         await ctx.reply(summary.text, {
           parse_mode: "HTML",
           reply_markup: {
@@ -212,9 +215,12 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
 
       const lowerArg = arg.toLowerCase();
       if (lowerArg === "free" || lowerArg === "list" || lowerArg === "all") {
-        await ctx.reply(await renderOpenCodeModelList(lowerArg === "free" ? "free" : "all"), {
-          parse_mode: "HTML",
-        });
+        await ctx.reply(
+          await renderOpenCodeModelList(lowerArg === "free" ? "free" : "all"),
+          {
+            parse_mode: "HTML",
+          },
+        );
         return;
       }
 
@@ -236,9 +242,12 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
 
       const { catalog, resolution } = await resolveOpenCodeModelSelection(arg);
       if (resolution.kind !== "exact") {
-        await ctx.reply(formatOpenCodeSelectionError(arg, resolution, catalog), {
-          parse_mode: "HTML",
-        });
+        await ctx.reply(
+          formatOpenCodeSelectionError(arg, resolution, catalog),
+          {
+            parse_mode: "HTML",
+          },
+        );
         return;
       }
 
@@ -534,15 +543,15 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     let turnsModelLabel = info.lastModel;
 
     if (config.backend === "opencode") {
-      const {
-        getOpenCodeModelInfo,
-        getOpenCodeSessionSnapshot,
-      } = await import("../../backend/opencode/index.js");
+      const { getOpenCodeModelInfo, getOpenCodeSessionSnapshot } =
+        await import("../../backend/opencode/index.js");
       const activeModelInfo = await getOpenCodeModelInfo(activeModel).catch(
         () => undefined,
       );
       const sessionSnapshot = info.sessionId
-        ? await getOpenCodeSessionSnapshot(info.sessionId).catch(() => undefined)
+        ? await getOpenCodeSessionSnapshot(info.sessionId).catch(
+            () => undefined,
+          )
         : undefined;
       const liveUsage = sessionSnapshot?.usage;
 

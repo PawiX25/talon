@@ -94,7 +94,7 @@ export async function getOpenCodeSettingsPresentation(
       model.providerID === currentModel.providerID
         ? `✓ ${getShortModelButtonLabel(model)}`
         : getShortModelButtonLabel(model),
-    callback_data: `settings:model:${model.id}`,
+    callback_data: `settings:model:${getOpenCodeModelSelectionValue(model, catalog)}`,
   }));
   modelButtons.push({ text: "Reset", callback_data: "settings:model:reset" });
 

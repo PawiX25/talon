@@ -36,6 +36,12 @@ import { isUserClientReady } from "./userbot.js";
 import { getWorkspaceDiskUsage } from "../../util/workspace.js";
 import { appendDailyLog } from "../../storage/daily-log.js";
 import { escapeHtml } from "./formatting.js";
+import {
+  formatModelLabel,
+  formatModelOptionLabel,
+  getTelegramModelOptions,
+  isSelectedModel,
+} from "./helpers.js";
 import { handleAdminCommand } from "./admin.js";
 import { getLoadedPlugins } from "../../core/plugin.js";
 import { getOpenCodeModelSelectionValue } from "../../backend/opencode/index.js";
@@ -76,13 +82,17 @@ function chunkButtons(
   return rows;
 }
 
-export function registerCommands(bot: Bot, config: TalonConfig): void {
+export function registerCommands(
+  bot: Bot,
+  config: TalonConfig,
+  gateway?: { backend: import("../../core/types.js").QueryBackend | null },
+): void {
   bot.command("start", (ctx) =>
     ctx.reply(
       [
         "<b>\uD83E\uDD85 Talon</b>",
         "",
-        "Claude-powered Telegram assistant with 31 tools.",
+        "Agentic AI harness for Telegram.",
         "",
         "Send a message, photo, doc, or voice note.",
         "In groups, @mention or reply to activate.",
@@ -163,6 +173,8 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     resetSession(cid);
     clearHistory(cid);
     resetPulseCheckpoint(cid);
+    // Warm up the new session so /status has context data immediately
+    await gateway?.backend?.warmSession?.(cid);
     await ctx.reply("Session cleared.");
   });
 
@@ -267,33 +279,23 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
 
     if (!arg) {
       const current = activeModel;
-      const isModel = (id: string) => current.includes(id);
+      // Build model buttons dynamically from the registry
+      const models = getTelegramModelOptions();
+      const modelButtons = models.map((m) => ({
+        text: isSelectedModel(current, m.id)
+          ? `\u2713 ${formatModelOptionLabel(m)}`
+          : formatModelOptionLabel(m),
+        callback_data: `model:${m.id}`,
+      }));
+      // Two models per row, plus a reset button on the last row
+      const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+      for (let i = 0; i < modelButtons.length; i += 2) {
+        rows.push(modelButtons.slice(i, i + 2));
+      }
+      rows.push([{ text: "Reset to default", callback_data: "model:reset" }]);
       await ctx.reply(
-        `<b>Model:</b> <code>${escapeHtml(current)}</code>\nSelect a model:`,
-        {
-          parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: isModel("sonnet") ? "\u2713 Sonnet 4.6" : "Sonnet 4.6",
-                  callback_data: "model:sonnet",
-                },
-                {
-                  text: isModel("opus") ? "\u2713 Opus 4.6" : "Opus 4.6",
-                  callback_data: "model:opus",
-                },
-              ],
-              [
-                {
-                  text: isModel("haiku") ? "\u2713 Haiku 4.5" : "Haiku 4.5",
-                  callback_data: "model:haiku",
-                },
-                { text: "Reset to default", callback_data: "model:reset" },
-              ],
-            ],
-          },
-        },
+        `<b>Model:</b> <code>${escapeHtml(formatModelLabel(current))}</code>\nSelect a model:`,
+        { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } },
       );
       return;
     }
@@ -301,7 +303,7 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     if (arg === "reset" || arg === "default") {
       setChatModel(cid, undefined);
       await ctx.reply(
-        `Model reset to default: <code>${escapeHtml(config.model)}</code>`,
+        `Model reset to default: <code>${escapeHtml(formatModelLabel(config.model))}</code>`,
         { parse_mode: "HTML" },
       );
       return;
@@ -309,9 +311,12 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
 
     const model = resolveModelName(arg);
     setChatModel(cid, model);
-    await ctx.reply(`Model set to <code>${escapeHtml(model)}</code>.`, {
-      parse_mode: "HTML",
-    });
+    await ctx.reply(
+      `Model set to <code>${escapeHtml(formatModelLabel(model))}</code>.`,
+      {
+        parse_mode: "HTML",
+      },
+    );
   });
 
   bot.command("effort", async (ctx) => {
@@ -524,9 +529,8 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     const activeModel = chatSets.model ?? config.model;
     const effortName = chatSets.effort ?? "adaptive";
     const pulseOn = isPulseEnabled(cid);
-
-    let contextMax = activeModel.includes("haiku") ? 200_000 : 1_000_000;
-    let contextUsed = u.lastPromptTokens;
+    let ctxUsed = u.contextTokens || u.lastPromptTokens;
+    let ctxMax = u.contextWindow;
     let displayInputTokens = u.totalInputTokens;
     let displayOutputTokens = u.totalOutputTokens;
     let displayCacheRead = u.totalCacheRead;
@@ -558,23 +562,21 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
         contextModelID === activeModel
           ? activeModelInfo
           : await getOpenCodeModelInfo(contextModelID).catch(() => undefined);
-      contextMax = contextModelInfo?.contextWindow ?? contextMax;
-      contextUsed = sessionSnapshot?.assistant
+      ctxMax = contextModelInfo?.contextWindow ?? ctxMax;
+      ctxUsed = sessionSnapshot?.assistant
         ? sessionSnapshot.assistant.inputTokens +
           sessionSnapshot.assistant.cacheRead +
           sessionSnapshot.assistant.cacheWrite
-        : contextUsed;
+        : ctxUsed;
     }
 
-    const contextPct =
-      contextMax > 0
-        ? Math.min(100, Math.round((contextUsed / contextMax) * 100))
-        : 0;
+    const ctxPct =
+      ctxMax > 0 ? Math.min(100, Math.round((ctxUsed / ctxMax) * 100)) : 0;
     const barLen = 20;
-    const filled = Math.round((contextPct / 100) * barLen);
+    const filled = Math.round((ctxPct / 100) * barLen);
     const contextBar =
       "\u2588".repeat(filled) + "\u2591".repeat(barLen - filled);
-    const contextWarn = contextPct >= 80 ? " \u26A0\uFE0F consider /reset" : "";
+    const contextWarn = ctxPct >= 80 ? " \u26A0\uFE0F consider /reset" : "";
 
     const totalPrompt =
       displayInputTokens + displayCacheRead + displayCacheWrite;
@@ -595,7 +597,7 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     const lines = [
       `<b>\uD83E\uDD85 Talon</b> \u00B7 <code>${escapeHtml(activeModel)}</code> \u00B7 effort: ${effortName}`,
       "",
-      `<b>Context</b>  ${formatTokenCount(contextUsed)} / ${formatTokenCount(contextMax)} (${contextPct}%)${contextWarn}`,
+      `<b>Context</b>  ${formatTokenCount(ctxUsed)} / ${formatTokenCount(ctxMax)} (${ctxPct}%)${contextWarn}`,
       `<code>${contextBar}</code>`,
       "",
       `<b>Session Stats</b>`,

@@ -18,8 +18,14 @@ type SessionUsage = {
   totalOutputTokens: number;
   totalCacheRead: number;
   totalCacheWrite: number;
-  /** Last turn's prompt tokens (context size snapshot). */
+  /** Last turn's total prompt tokens (cumulative across all API calls in the turn, including tool-use loops). */
   lastPromptTokens: number;
+  /** Actual context window fill from the last API call (last iteration's prompt tokens). */
+  contextTokens: number;
+  /** Model's context window size in tokens (from SDK modelUsage). */
+  contextWindow: number;
+  /** Number of API round-trips in the last turn (tool-use steps). */
+  numApiCalls: number;
   /** Estimated cost in USD. */
   estimatedCostUsd: number;
   /** Total response time in ms (for averaging). */
@@ -119,6 +125,9 @@ const emptyUsage = (): SessionUsage => ({
   totalCacheRead: 0,
   totalCacheWrite: 0,
   lastPromptTokens: 0,
+  contextTokens: 0,
+  contextWindow: 0,
+  numApiCalls: 0,
   estimatedCostUsd: 0,
   totalResponseMs: 0,
   lastResponseMs: 0,
@@ -150,6 +159,12 @@ export function getSession(chatId: string): SessionState {
     session.usage.fastestResponseMs === 0
   )
     session.usage.fastestResponseMs = Infinity;
+  // Migrate sessions from before context tracking was added
+  if (session.usage.contextTokens === undefined)
+    session.usage.contextTokens = 0;
+  if (session.usage.contextWindow === undefined)
+    session.usage.contextWindow = 0;
+  if (session.usage.numApiCalls === undefined) session.usage.numApiCalls = 0;
   return session;
 }
 
@@ -166,7 +181,7 @@ export function incrementTurns(chatId: string): void {
   dirty = true;
 }
 
-/** Model-specific pricing ($ per million tokens). */
+/** Legacy Claude pricing fallback ($ per million tokens). */
 const MODEL_PRICING: Record<
   string,
   { input: number; output: number; cacheRead: number; cacheWrite: number }
@@ -194,14 +209,20 @@ export function recordUsage(
     durationMs?: number;
     model?: string;
     costUsd?: number;
+    /** Actual context fill from the last API call (last iteration's prompt tokens). */
+    contextTokens?: number;
+    /** Model context window size from SDK modelUsage. */
+    contextWindow?: number;
+    /** Number of agentic turns / API round-trips in this turn. */
+    numApiCalls?: number;
   },
 ): void {
   const session = getSession(chatId);
+  // Token counts from SDK modelUsage (accumulated per-turn)
   session.usage.totalInputTokens += turn.inputTokens;
   session.usage.totalOutputTokens += turn.outputTokens;
   session.usage.totalCacheRead += turn.cacheRead;
   session.usage.totalCacheWrite += turn.cacheWrite;
-  // Snapshot: prompt tokens = input + cache_read + cache_write for this turn
   session.usage.lastPromptTokens =
     turn.inputTokens + turn.cacheRead + turn.cacheWrite;
   // Prefer backend-reported cost when available; otherwise fall back to
@@ -217,7 +238,16 @@ export function recordUsage(
         turn.outputTokens * pricing.output) /
       1_000_000;
   }
-  // Track which model was last used
+  // Context info from SDK
+  session.usage.contextTokens = turn.contextTokens ?? 0;
+  if (
+    turn.contextWindow !== undefined &&
+    Number.isFinite(turn.contextWindow) &&
+    turn.contextWindow > 0
+  ) {
+    session.usage.contextWindow = turn.contextWindow;
+  }
+  session.usage.numApiCalls = turn.numApiCalls ?? 0;
   if (turn.model) session.lastModel = turn.model;
   // Response time tracking
   if (turn.durationMs && turn.durationMs > 0) {
@@ -297,17 +327,7 @@ export function getAllSessions(): Array<{ chatId: string; info: SessionInfo }> {
       turns: session.turns,
       lastActive: session.lastActive,
       createdAt: session.createdAt,
-      usage: session.usage ?? {
-        totalInputTokens: 0,
-        totalOutputTokens: 0,
-        totalCacheRead: 0,
-        totalCacheWrite: 0,
-        lastPromptTokens: 0,
-        estimatedCostUsd: 0,
-        totalResponseMs: 0,
-        lastResponseMs: 0,
-        fastestResponseMs: Infinity,
-      },
+      usage: session.usage ?? emptyUsage(),
       sessionName: session.sessionName,
       lastModel: session.lastModel,
     },

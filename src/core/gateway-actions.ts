@@ -1,7 +1,7 @@
 /**
  * Shared gateway actions — platform-agnostic handlers that work with any frontend.
  *
- * Handles: cron CRUD, fetch_url, in-memory history queries.
+ * Handles: cron CRUD, fetch_url, plugin reload, in-memory history queries.
  * Returns null if the action isn't recognized (so the gateway delegates to the frontend).
  */
 
@@ -27,7 +27,7 @@ import {
   type CronJobType,
 } from "../storage/cron-store.js";
 import { log } from "../util/log.js";
-import type { ActionResult } from "./types.js";
+import type { ActionResult, QueryBackend } from "./types.js";
 
 /** Extract readable text from HTML using cheerio (proper DOM parser). */
 function extractText(html: string, maxLength = 8000): string {
@@ -42,6 +42,7 @@ function extractText(html: string, maxLength = 8000): string {
 export async function handleSharedAction(
   body: Record<string, unknown>,
   chatId: number,
+  backend?: QueryBackend | null,
 ): Promise<ActionResult | null> {
   const action = body.action as string;
 
@@ -308,6 +309,37 @@ export async function handleSharedAction(
         return { ok: false, error: "Job belongs to a different chat" };
       deleteCronJob(jobId);
       return { ok: true, text: `Deleted cron job "${job.name}" (${jobId})` };
+    }
+
+    // ── Plugin hot-reload ──────────────────────────────────────────────
+    case "reload_plugins": {
+      try {
+        const { reloadPlugins, getPluginPromptAdditions } =
+          await import("./plugin.js");
+        const { rebuildSystemPrompt } = await import("../util/config.js");
+
+        // reloadPlugins reads + validates config internally — no double read.
+        // Frontends are derived from config if not explicitly provided.
+        const { names, config: freshConfig } = await reloadPlugins();
+
+        // Rebuild system prompt on the freshConfig, then update the backend's
+        // live config reference so subsequent messages use the new prompt
+        rebuildSystemPrompt(freshConfig, getPluginPromptAdditions());
+        backend?.updateSystemPrompt?.(freshConfig.systemPrompt);
+
+        log("gateway", `reload_plugins: ${names.length} plugins loaded`);
+        return {
+          ok: true,
+          text:
+            `Plugins reloaded successfully.\n` +
+            `Loaded (${names.length}): ${names.length > 0 ? names.join(", ") : "(none)"}`,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Plugin reload failed: ${err instanceof Error ? err.message : err}`,
+        };
+      }
     }
 
     default:

@@ -77,7 +77,7 @@ export function createTelegramFrontend(
         adminUserId: config.adminUserId,
       });
 
-      registerCommands(bot, config);
+      registerCommands(bot, config, gateway);
       registerMiddleware(bot, config);
       registerCallbacks(bot, config);
 

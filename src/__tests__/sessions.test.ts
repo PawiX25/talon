@@ -72,7 +72,6 @@ describe("sessions", () => {
       expect(session.usage.totalCacheRead).toBe(0);
       expect(session.usage.totalCacheWrite).toBe(0);
       expect(session.usage.lastPromptTokens).toBe(0);
-      expect(session.usage.estimatedCostUsd).toBe(0);
       expect(session.usage.totalResponseMs).toBe(0);
       expect(session.usage.lastResponseMs).toBe(0);
       expect(session.usage.fastestResponseMs).toBe(Infinity);
@@ -149,20 +148,6 @@ describe("sessions", () => {
         cacheWrite: 20,
       });
       expect(getSession(chatId).usage.lastPromptTokens).toBe(250);
-    });
-
-    it("calculates estimated cost", () => {
-      const chatId = "test-cost";
-      getSession(chatId);
-
-      recordUsage(chatId, {
-        inputTokens: 1_000_000,
-        outputTokens: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-      });
-      // Cost for 1M input tokens at $3/M = $3
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(3, 1);
     });
 
     it("tracks response time duration", () => {
@@ -251,96 +236,7 @@ describe("sessions", () => {
     });
   });
 
-  describe("recordUsage with model pricing", () => {
-    it("applies haiku pricing for haiku model", () => {
-      const chatId = "test-haiku-pricing";
-      getSession(chatId);
-
-      recordUsage(chatId, {
-        inputTokens: 1_000_000,
-        outputTokens: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        model: "claude-haiku-4-5",
-      });
-      // Haiku input: $0.8/M
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(0.8, 1);
-    });
-
-    it("applies opus pricing for opus model", () => {
-      const chatId = "test-opus-pricing";
-      getSession(chatId);
-
-      recordUsage(chatId, {
-        inputTokens: 1_000_000,
-        outputTokens: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        model: "claude-opus-4-6",
-      });
-      // Opus input: $15/M
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(15, 1);
-    });
-
-    it("applies sonnet pricing by default (no model)", () => {
-      const chatId = "test-sonnet-pricing-default";
-      getSession(chatId);
-
-      recordUsage(chatId, {
-        inputTokens: 1_000_000,
-        outputTokens: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-      });
-      // Sonnet input: $3/M
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(3, 1);
-    });
-
-    it("calculates output cost correctly", () => {
-      const chatId = "test-output-cost";
-      getSession(chatId);
-
-      recordUsage(chatId, {
-        inputTokens: 0,
-        outputTokens: 1_000_000,
-        cacheRead: 0,
-        cacheWrite: 0,
-        model: "claude-sonnet-4-6",
-      });
-      // Sonnet output: $15/M
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(15, 1);
-    });
-
-    it("calculates cache read cost correctly", () => {
-      const chatId = "test-cache-read-cost";
-      getSession(chatId);
-
-      recordUsage(chatId, {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheRead: 1_000_000,
-        cacheWrite: 0,
-        model: "claude-sonnet-4-6",
-      });
-      // Sonnet cacheRead: $0.3/M
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(0.3, 2);
-    });
-
-    it("calculates cache write cost correctly", () => {
-      const chatId = "test-cache-write-cost";
-      getSession(chatId);
-
-      recordUsage(chatId, {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheRead: 0,
-        cacheWrite: 1_000_000,
-        model: "claude-sonnet-4-6",
-      });
-      // Sonnet cacheWrite: $3.75/M
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(3.75, 2);
-    });
-
+  describe("recordUsage — model tracking", () => {
     it("tracks lastModel", () => {
       const chatId = "test-last-model";
       getSession(chatId);
@@ -388,6 +284,157 @@ describe("sessions", () => {
       expect(usage.fastestResponseMs).toBe(500);
       expect(usage.lastResponseMs).toBe(1000);
       expect(usage.totalResponseMs).toBe(3500);
+    });
+  });
+
+  describe("recordUsage — context tracking fields", () => {
+    it("stores contextTokens from SDK iteration data", () => {
+      const chatId = "test-ctx-tokens";
+      getSession(chatId);
+
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 10,
+        cacheWrite: 5,
+        contextTokens: 85000,
+      });
+
+      expect(getSession(chatId).usage.contextTokens).toBe(85000);
+    });
+
+    it("stores contextWindow from SDK modelUsage", () => {
+      const chatId = "test-ctx-window";
+      getSession(chatId);
+
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        contextWindow: 1_000_000,
+      });
+
+      expect(getSession(chatId).usage.contextWindow).toBe(1_000_000);
+    });
+
+    it("stores numApiCalls from SDK num_turns", () => {
+      const chatId = "test-num-api-calls";
+      getSession(chatId);
+
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        numApiCalls: 3,
+      });
+
+      expect(getSession(chatId).usage.numApiCalls).toBe(3);
+    });
+
+    it("resets contextTokens to 0 when not provided", () => {
+      const chatId = "test-ctx-tokens-reset";
+      getSession(chatId);
+
+      // First turn with context data
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        contextTokens: 50000,
+      });
+      expect(getSession(chatId).usage.contextTokens).toBe(50000);
+
+      // Second turn without context data — resets to 0
+      recordUsage(chatId, {
+        inputTokens: 200,
+        outputTokens: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      expect(getSession(chatId).usage.contextTokens).toBe(0);
+    });
+
+    it("preserves contextWindow across turns when not reported", () => {
+      const chatId = "test-ctx-window-preserve";
+      getSession(chatId);
+
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        contextWindow: 1_000_000,
+      });
+      expect(getSession(chatId).usage.contextWindow).toBe(1_000_000);
+
+      // Turn without contextWindow — preserves previous value
+      recordUsage(chatId, {
+        inputTokens: 200,
+        outputTokens: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      expect(getSession(chatId).usage.contextWindow).toBe(1_000_000);
+    });
+
+    it("rejects non-finite contextWindow values and keeps previous", () => {
+      const chatId = "test-ctx-window-nan";
+      getSession(chatId);
+
+      // Set a valid contextWindow first
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        contextWindow: 1_000_000,
+      });
+      expect(getSession(chatId).usage.contextWindow).toBe(1_000_000);
+
+      // NaN should not overwrite
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        contextWindow: NaN,
+      });
+      expect(getSession(chatId).usage.contextWindow).toBe(1_000_000);
+
+      // Infinity should not overwrite
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        contextWindow: Infinity,
+      });
+      expect(getSession(chatId).usage.contextWindow).toBe(1_000_000);
+    });
+
+    it("rejects negative contextWindow values and keeps previous", () => {
+      const chatId = "test-ctx-window-neg";
+      getSession(chatId);
+
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        contextWindow: 200_000,
+      });
+
+      recordUsage(chatId, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        contextWindow: -100,
+      });
+      expect(getSession(chatId).usage.contextWindow).toBe(200_000);
     });
   });
 
@@ -484,52 +531,6 @@ describe("sessions", () => {
     });
   });
 
-  describe("cost calculation math", () => {
-    it("calculates multi-component cost correctly (input + output + cache)", () => {
-      const chatId = "test-cost-math";
-      getSession(chatId);
-
-      // Use exact token counts to verify the formula:
-      // cost = (input * pricing.input + cacheWrite * pricing.cacheWrite +
-      //         cacheRead * pricing.cacheRead + output * pricing.output) / 1_000_000
-      // Sonnet: input=$3/M, output=$15/M, cacheRead=$0.3/M, cacheWrite=$3.75/M
-      recordUsage(chatId, {
-        inputTokens: 500_000, // 500k * 3 / 1M = $1.50
-        outputTokens: 100_000, // 100k * 15 / 1M = $1.50
-        cacheRead: 200_000, // 200k * 0.3 / 1M = $0.06
-        cacheWrite: 100_000, // 100k * 3.75 / 1M = $0.375
-        model: "claude-sonnet-4-6",
-      });
-
-      const usage = getSession(chatId).usage;
-      // Total: 1.50 + 1.50 + 0.06 + 0.375 = $3.435
-      expect(usage.estimatedCostUsd).toBeCloseTo(3.435, 3);
-    });
-
-    it("accumulates cost across multiple recordUsage calls", () => {
-      const chatId = "test-cost-accum";
-      getSession(chatId);
-
-      recordUsage(chatId, {
-        inputTokens: 1_000_000,
-        outputTokens: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-      });
-      // Sonnet input: $3
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(3, 2);
-
-      recordUsage(chatId, {
-        inputTokens: 0,
-        outputTokens: 1_000_000,
-        cacheRead: 0,
-        cacheWrite: 0,
-      });
-      // + Sonnet output: $15. Total: $18
-      expect(getSession(chatId).usage.estimatedCostUsd).toBeCloseTo(18, 2);
-    });
-  });
-
   describe("cache hit rate tracking", () => {
     it("tracks cache read tokens across multiple turns", () => {
       const chatId = "test-cache-track-read";
@@ -571,7 +572,6 @@ describe("sessions", () => {
       const fresh = getSession(chatId);
       expect(fresh.sessionId).toBeUndefined();
       expect(fresh.turns).toBe(0);
-      expect(fresh.usage.estimatedCostUsd).toBe(0);
       expect(fresh.usage.totalInputTokens).toBe(0);
     });
   });
@@ -640,6 +640,40 @@ describe("sessions — migration of legacy field formats", () => {
     loadSessions();
     const session = getSession("migrate-chat-2");
     expect(session.createdAt).toBe(9999999);
+  });
+
+  it("backfills missing context tracking fields on legacy sessions", () => {
+    vi.mocked(existsSync).mockReturnValueOnce(true);
+    vi.mocked(readFileSync).mockReturnValueOnce(
+      JSON.stringify({
+        "migrate-chat-ctx": {
+          sessionId: undefined,
+          turns: 4,
+          lastActive: 2000,
+          createdAt: 2000,
+          usage: {
+            totalInputTokens: 100,
+            totalOutputTokens: 50,
+            totalCacheRead: 10,
+            totalCacheWrite: 5,
+            lastPromptTokens: 115,
+            estimatedCostUsd: 0.5,
+            totalResponseMs: 1000,
+            lastResponseMs: 500,
+            fastestResponseMs: 500,
+            // contextTokens, contextWindow, numApiCalls deliberately omitted
+          },
+        },
+      }),
+    );
+    loadSessions();
+    const session = getSession("migrate-chat-ctx");
+    expect(session.usage.contextTokens).toBe(0);
+    expect(session.usage.contextWindow).toBe(0);
+    expect(session.usage.numApiCalls).toBe(0);
+    // Existing fields should be preserved
+    expect(session.usage.totalInputTokens).toBe(100);
+    expect(session.usage.lastPromptTokens).toBe(115);
   });
 
   it("fixes fastestResponseMs of 0 to Infinity", () => {

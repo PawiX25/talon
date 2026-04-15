@@ -22,7 +22,14 @@ import {
 } from "../../core/pulse.js";
 import { handleCallbackQuery } from "./handlers.js";
 import { escapeHtml } from "./formatting.js";
-import { renderSettingsText, renderSettingsKeyboard } from "./helpers.js";
+import {
+  formatModelLabel,
+  formatModelOptionLabel,
+  getTelegramModelOptions,
+  isSelectedModel,
+  renderSettingsText,
+  renderSettingsKeyboard,
+} from "./helpers.js";
 import {
   getOpenCodeSettingsPresentation,
   resolveOpenCodeModelSelection,
@@ -89,7 +96,7 @@ export function registerCallbacks(bot: Bot, config: TalonConfig): void {
           }
         }
         await ctx.answerCallbackQuery({
-          text: `Model: ${getChatSettings(cid).model ?? config.model}`,
+          text: `Model: ${formatModelLabel(getChatSettings(cid).model ?? config.model)}`,
         });
       } else if (category === "effort") {
         if (value === "adaptive") {
@@ -245,46 +252,33 @@ export function registerCallbacks(bot: Bot, config: TalonConfig): void {
       if (model === "reset") {
         setChatModel(cid, undefined);
         await ctx.answerCallbackQuery({
-          text: `Model: ${config.model} (default)`,
+          text: `Model: ${formatModelLabel(config.model)} (default)`,
         });
       } else {
         const resolved = resolveModelName(model);
         setChatModel(cid, resolved);
         await ctx.answerCallbackQuery({
-          text: `Model: ${resolved}`,
+          text: `Model: ${formatModelLabel(resolved)}`,
         });
       }
       const current = getChatSettings(cid).model ?? config.model;
-      const isModel = (id: string) => current.includes(id);
+      // Build model buttons dynamically from the registry
+      const models = getTelegramModelOptions();
+      const modelButtons = models.map((m) => ({
+        text: isSelectedModel(current, m.id)
+          ? `\u2713 ${formatModelOptionLabel(m)}`
+          : formatModelOptionLabel(m),
+        callback_data: `model:${m.id}`,
+      }));
+      const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+      for (let i = 0; i < modelButtons.length; i += 2) {
+        rows.push(modelButtons.slice(i, i + 2));
+      }
+      rows.push([{ text: "Reset to default", callback_data: "model:reset" }]);
       try {
         await ctx.editMessageText(
-          `<b>Model:</b> <code>${escapeHtml(current)}</code>`,
-          {
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    text: isModel("sonnet")
-                      ? "\u2713 Sonnet 4.6"
-                      : "Sonnet 4.6",
-                    callback_data: "model:sonnet",
-                  },
-                  {
-                    text: isModel("opus") ? "\u2713 Opus 4.6" : "Opus 4.6",
-                    callback_data: "model:opus",
-                  },
-                ],
-                [
-                  {
-                    text: isModel("haiku") ? "\u2713 Haiku 4.5" : "Haiku 4.5",
-                    callback_data: "model:haiku",
-                  },
-                  { text: "Reset to default", callback_data: "model:reset" },
-                ],
-              ],
-            },
-          },
+          `<b>Model:</b> <code>${escapeHtml(formatModelLabel(current))}</code>`,
+          { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } },
         );
       } catch {
         /* message unchanged */

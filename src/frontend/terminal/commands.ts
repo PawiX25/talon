@@ -136,7 +136,10 @@ export function registerBuiltinCommands(): void {
           if (quickPicks.length > 0) {
             ctx.renderer.writeln(
               `  Free now: ${quickPicks
-                .map((model) => `${model.id}${model.free ? " (free)" : ""}`)
+                .map(
+                  (model) =>
+                    `${getOpenCodeModelSelectionValue(model, catalog)}${model.free ? " (free)" : ""}`,
+                )
                 .join("  ·  ")}`,
             );
           }
@@ -269,9 +272,11 @@ export function registerBuiltinCommands(): void {
       }
 
       if (!args) {
-        ctx.renderer.writeSystem(
-          `Model: ${currentModel}`,
-        );
+        const { getModels } = await import("../../core/models.js");
+        const names = getModels()
+          .map((m) => m.aliases[0] ?? m.id)
+          .join(", ");
+        ctx.renderer.writeSystem(`Model: ${currentModel} (available: ${names})`);
       } else {
         setChatModel(ctx.chatId(), resolveModelName(args));
         ctx.renderer.writeSystem(`Model → ${resolveModelName(args)}`);

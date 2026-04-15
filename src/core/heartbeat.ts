@@ -18,6 +18,8 @@ import { files as pathFiles, dirs } from "../util/paths.js";
 import { log, logError, logWarn } from "../util/log.js";
 import { toYMD } from "../util/time.js";
 import { getPluginMcpServers } from "./plugin.js";
+import { DISALLOWED_TOOLS_BACKGROUND } from "../backend/claude-sdk/constants.js";
+import { getDefaultModel } from "./models.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -263,7 +265,7 @@ async function runHeartbeatAgent(
   }
 
   const model =
-    configRef.heartbeatModel ?? configRef.model ?? "claude-sonnet-4-6";
+    configRef.heartbeatModel ?? configRef.model ?? getDefaultModel("balanced");
 
   // Set up heartbeat log file
   const heartbeatLogFile = await createHeartbeatLogFile();
@@ -292,22 +294,7 @@ async function runHeartbeatAgent(
       : {}),
     // Load all registered plugin MCP servers (excludes frontend-specific tools like telegram)
     mcpServers: getPluginMcpServers("", "heartbeat"),
-    disallowedTools: [
-      "EnterPlanMode",
-      "ExitPlanMode",
-      "EnterWorktree",
-      "ExitWorktree",
-      "TodoWrite",
-      "TodoRead",
-      "TaskCreate",
-      "TaskUpdate",
-      "TaskGet",
-      "TaskList",
-      "TaskOutput",
-      "TaskStop",
-      "AskUserQuestion",
-      "Agent",
-    ],
+    disallowedTools: [...DISALLOWED_TOOLS_BACKGROUND],
   };
 
   // NOTE: The timeout races against the agent promise but cannot abort the

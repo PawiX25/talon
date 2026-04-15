@@ -20,6 +20,8 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { files as pathFiles, dirs } from "../util/paths.js";
 import { log, logError, logWarn } from "../util/log.js";
 import { getPluginMcpServers } from "./plugin.js";
+import { DISALLOWED_TOOLS_BACKGROUND } from "../backend/claude-sdk/constants.js";
+import { getDefaultModel } from "./models.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -178,7 +180,8 @@ If commands fail, log the error and continue — this stage is optional.`
     throw new Error(`Failed to read dream prompt from ${promptPath}`);
   }
 
-  const model = configRef.dreamModel ?? configRef.model ?? "claude-sonnet-4-6";
+  const model =
+    configRef.dreamModel ?? configRef.model ?? getDefaultModel("balanced");
   const workspace = configRef.workspace ?? dirs.workspace;
 
   // Set up dream log file
@@ -208,22 +211,7 @@ If commands fail, log the error and continue — this stage is optional.`
     mcpServers: configRef.mempalace
       ? getPluginMcpServers("", "dream", ["mempalace"])
       : {},
-    disallowedTools: [
-      "EnterPlanMode",
-      "ExitPlanMode",
-      "EnterWorktree",
-      "ExitWorktree",
-      "TodoWrite",
-      "TodoRead",
-      "TaskCreate",
-      "TaskUpdate",
-      "TaskGet",
-      "TaskList",
-      "TaskOutput",
-      "TaskStop",
-      "AskUserQuestion",
-      "Agent",
-    ],
+    disallowedTools: [...DISALLOWED_TOOLS_BACKGROUND],
   };
 
   const timeoutPromise = new Promise<never>((_, reject) =>

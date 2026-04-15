@@ -387,6 +387,7 @@ const messageQueues = new Map<
     messages: QueuedMessage[];
     timer: ReturnType<typeof setTimeout>;
     bot: Bot;
+    config: TalonConfig;
     numericChatId: number;
     queuedReactionMsgIds: number[];
   }
@@ -441,6 +442,7 @@ function isUserRateLimited(senderId: number): boolean {
  */
 function enqueueMessage(
   bot: Bot,
+  config: TalonConfig,
   chatId: string,
   numericChatId: number,
   msg: QueuedMessage,
@@ -468,6 +470,7 @@ function enqueueMessage(
     messages: [msg],
     timer: setTimeout(() => flushQueue(chatId), DEBOUNCE_MS),
     bot,
+    config,
     numericChatId,
     queuedReactionMsgIds: [] as number[],
   };
@@ -479,7 +482,7 @@ async function flushQueue(chatId: string): Promise<void> {
   if (!entry) return;
   messageQueues.delete(chatId);
 
-  const { messages, bot, numericChatId, queuedReactionMsgIds } = entry;
+  const { messages, bot, config, numericChatId, queuedReactionMsgIds } = entry;
 
   // Clear hourglass reactions on queued messages now that we're processing
   for (const msgId of queuedReactionMsgIds) {
@@ -509,6 +512,7 @@ async function flushQueue(chatId: string): Promise<void> {
   try {
     await processAndReply({
       bot,
+      config,
       chatId,
       numericChatId,
       replyToId: last.replyToId,
@@ -542,6 +546,7 @@ async function flushQueue(chatId: string): Promise<void> {
         await new Promise((r) => setTimeout(r, delayMs));
         await processAndReply({
           bot,
+          config,
           chatId,
           numericChatId,
           replyToId: last.replyToId,
@@ -612,6 +617,7 @@ async function sendHtml(
  */
 type ProcessAndReplyParams = {
   bot: Bot;
+  config: TalonConfig;
   chatId: string | number;
   numericChatId: number;
   replyToId: number;
@@ -631,6 +637,7 @@ type StreamState = {
   lastSentLength: number;
   started: boolean;
   editing: boolean;
+  sentTextBlock: boolean;
 };
 
 // Probe once at startup whether sendMessageDraft is supported
@@ -674,6 +681,7 @@ function createStreamCallbacks(
   const onTextBlock = async (text: string) => {
     await sendHtml(bot, chatId, markdownToTelegramHtml(text), _replyToId);
     state.lastSentLength = 0;
+    state.sentTextBlock = true;
   };
 
   return { onStreamDelta, onTextBlock };
@@ -682,6 +690,7 @@ function createStreamCallbacks(
 async function processAndReply(params: ProcessAndReplyParams): Promise<void> {
   const {
     bot,
+    config,
     chatId,
     numericChatId,
     replyToId,
@@ -699,6 +708,7 @@ async function processAndReply(params: ProcessAndReplyParams): Promise<void> {
     lastSentLength: 0,
     started: false,
     editing: false,
+    sentTextBlock: false,
   };
   // Wait 1s before starting streaming — avoids flickering on fast responses
   const streamTimer = setTimeout(() => {
@@ -743,14 +753,29 @@ async function processAndReply(params: ProcessAndReplyParams): Promise<void> {
       },
     });
 
-    // Only deliver messages sent via the send tool.
-    // Do NOT send fallback text — if Claude chose not to use send,
-    // it's either choosing not to respond or outputting internal reasoning.
-    if (result.bridgeMessageCount === 0 && result.text?.trim()) {
-      log(
-        "bot",
-        `Suppressed fallback text (${result.text.length} chars) — no send tool used`,
-      );
+    if (
+      result.bridgeMessageCount === 0 &&
+      !stream.sentTextBlock &&
+      result.text?.trim()
+    ) {
+      if (config.backend === "opencode") {
+        await sendHtml(
+          bot,
+          numericChatId,
+          markdownToTelegramHtml(result.text),
+          replyToId,
+        );
+        appendDailyLogResponse("Talon", result.text, { chatTitle });
+        log(
+          "bot",
+          `Delivered OpenCode fallback text (${result.text.length} chars)`,
+        );
+      } else {
+        log(
+          "bot",
+          `Suppressed fallback text (${result.text.length} chars) — no send tool used`,
+        );
+      }
     }
   } finally {
     clearTimeout(streamTimer);
@@ -853,7 +878,7 @@ async function handleMediaMessage(
 
     const prompt = promptParts.join("\n");
 
-    enqueueMessage(bot, chatId, ctx.chat.id, {
+    enqueueMessage(bot, config, chatId, ctx.chat.id, {
       prompt,
       replyToId: ctx.message.message_id,
       messageId: ctx.message.message_id,
@@ -909,7 +934,7 @@ export async function handleTextMessage(
   );
   const prompt = fwdCtx + replyCtx + replyPhotoCtx + (ctx.message.text ?? "");
 
-  enqueueMessage(bot, chatId, ctx.chat.id, {
+  enqueueMessage(bot, config, chatId, ctx.chat.id, {
     prompt,
     replyToId: ctx.message.message_id,
     messageId: ctx.message.message_id,
@@ -1029,7 +1054,7 @@ export async function handleStickerMessage(
     .filter(Boolean)
     .join("\n");
 
-  enqueueMessage(bot, chatId, ctx.chat.id, {
+  enqueueMessage(bot, config, chatId, ctx.chat.id, {
     prompt,
     replyToId: ctx.message.message_id,
     messageId: ctx.message.message_id,
@@ -1174,6 +1199,7 @@ export async function handleCallbackQuery(
 
     await processAndReply({
       bot,
+      config,
       chatId,
       numericChatId,
       replyToId,

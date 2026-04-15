@@ -42,6 +42,7 @@ export function renderSettingsText(
   effort: string,
   proactive: boolean,
   pulseIntervalMs?: number,
+  modelDetails?: Array<string>,
 ): string {
   const intervalStr = pulseIntervalMs
     ? formatDuration(pulseIntervalMs)
@@ -50,35 +51,49 @@ export function renderSettingsText(
     "<b>\uD83E\uDD85 Settings</b>",
     "",
     `<b>Model:</b> <code>${escapeHtml(model)}</code>`,
+    ...(modelDetails?.length ? modelDetails : []),
     `<b>Effort:</b> ${effort}`,
     `<b>Pulse:</b> ${proactive ? "on" : "off"} (every ${intervalStr})`,
   ].join("\n");
 }
 
+type SettingsButton = { text: string; callback_data: string };
+
 export function renderSettingsKeyboard(
   model: string,
   effort: string,
   proactive: boolean,
-): Array<Array<{ text: string; callback_data: string }>> {
+  modelButtons?: Array<SettingsButton>,
+): Array<Array<SettingsButton>> {
   const isModel = (id: string) => model.includes(id);
+  const defaultModelButtons: Array<SettingsButton> = [
+    {
+      text: isModel("sonnet") ? "✓ Sonnet" : "Sonnet",
+      callback_data: "settings:model:sonnet",
+    },
+    {
+      text: isModel("opus") ? "✓ Opus" : "Opus",
+      callback_data: "settings:model:opus",
+    },
+    {
+      text: isModel("haiku") ? "✓ Haiku" : "Haiku",
+      callback_data: "settings:model:haiku",
+    },
+  ];
+
+  const selectedModelButtons = (modelButtons?.length ? modelButtons : defaultModelButtons).map(
+    (button) => ({ ...button }),
+  );
+  const modelRows: Array<Array<SettingsButton>> = [];
+  for (let index = 0; index < selectedModelButtons.length; index += 2) {
+    modelRows.push(selectedModelButtons.slice(index, index + 2));
+  }
+
   return [
+    ...modelRows,
     [
       {
-        text: isModel("sonnet") ? "\u2713 Sonnet" : "Sonnet",
-        callback_data: "settings:model:sonnet",
-      },
-      {
-        text: isModel("opus") ? "\u2713 Opus" : "Opus",
-        callback_data: "settings:model:opus",
-      },
-      {
-        text: isModel("haiku") ? "\u2713 Haiku" : "Haiku",
-        callback_data: "settings:model:haiku",
-      },
-    ],
-    [
-      {
-        text: effort === "low" ? "\u2713 Low" : "Low",
+        text: effort === "low" ? "✓ Low" : "Low",
         callback_data: "settings:effort:low",
       },
       {

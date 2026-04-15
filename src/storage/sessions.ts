@@ -193,6 +193,7 @@ export function recordUsage(
     cacheWrite: number;
     durationMs?: number;
     model?: string;
+    costUsd?: number;
   },
 ): void {
   const session = getSession(chatId);
@@ -203,14 +204,19 @@ export function recordUsage(
   // Snapshot: prompt tokens = input + cache_read + cache_write for this turn
   session.usage.lastPromptTokens =
     turn.inputTokens + turn.cacheRead + turn.cacheWrite;
-  // Model-aware cost estimate
-  const pricing = getPricing(turn.model);
-  session.usage.estimatedCostUsd +=
-    (turn.inputTokens * pricing.input +
-      turn.cacheWrite * pricing.cacheWrite +
-      turn.cacheRead * pricing.cacheRead +
-      turn.outputTokens * pricing.output) /
-    1_000_000;
+  // Prefer backend-reported cost when available; otherwise fall back to
+  // Claude-era model pricing heuristics.
+  if (typeof turn.costUsd === "number" && Number.isFinite(turn.costUsd)) {
+    session.usage.estimatedCostUsd += turn.costUsd;
+  } else {
+    const pricing = getPricing(turn.model);
+    session.usage.estimatedCostUsd +=
+      (turn.inputTokens * pricing.input +
+        turn.cacheWrite * pricing.cacheWrite +
+        turn.cacheRead * pricing.cacheRead +
+        turn.outputTokens * pricing.output) /
+      1_000_000;
+  }
   // Track which model was last used
   if (turn.model) session.lastModel = turn.model;
   // Response time tracking

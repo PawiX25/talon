@@ -38,6 +38,7 @@ import { appendDailyLog } from "../../storage/daily-log.js";
 import { escapeHtml } from "./formatting.js";
 import { handleAdminCommand } from "./admin.js";
 import { getLoadedPlugins } from "../../core/plugin.js";
+import { getOpenCodeModelSelectionValue } from "../../backend/opencode/index.js";
 import {
   formatDuration,
   formatTokenCount,
@@ -46,6 +47,15 @@ import {
   renderSettingsText,
   renderSettingsKeyboard,
 } from "./helpers.js";
+import {
+  formatOpenCodeSelectionError,
+  formatOpenCodeUnavailableModel,
+  getOpenCodeSettingsPresentation,
+  renderOpenCodeModelList,
+  renderOpenCodeModelSummary,
+  resolveOpenCodeModelSelection,
+  type TelegramInlineButton,
+} from "./opencode-ui.js";
 
 // Admin user ID is set via talon.json or TALON_ADMIN_USER_ID env var
 let ADMIN_USER_ID = 0;
@@ -53,6 +63,17 @@ let ADMIN_USER_ID = 0;
 /** Set the admin user ID (called from config at startup). */
 export function setAdminUserId(id: number | undefined): void {
   ADMIN_USER_ID = id ?? 0;
+}
+
+function chunkButtons(
+  buttons: Array<TelegramInlineButton>,
+  columns = 2,
+): Array<Array<TelegramInlineButton>> {
+  const rows: Array<Array<TelegramInlineButton>> = [];
+  for (let index = 0; index < buttons.length; index += columns) {
+    rows.push(buttons.slice(index, index + columns));
+  }
+  return rows;
 }
 
 export function registerCommands(bot: Bot, config: TalonConfig): void {
@@ -79,7 +100,9 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
         "",
         "<b>\uD83E\uDD85 Settings</b>",
         "  /settings -- view and change all chat settings",
-        "  /model -- show or change model (sonnet, opus, haiku)",
+          config.backend === "opencode"
+            ? "  /model -- browse/change OpenCode models (free + login info)"
+            : "  /model -- show or change model (sonnet, opus, haiku)",
         "  /effort -- set thinking effort (off, low, medium, high, max)",
         "  /pulse -- toggle periodic check-ins (on/off)",
         "",
@@ -173,9 +196,77 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     const cid = String(ctx.chat.id);
     const arg = ctx.match?.trim();
     const settings = getChatSettings(cid);
+    const activeModel = settings.model ?? config.model;
+
+    if (config.backend === "opencode") {
+      if (!arg) {
+        const summary = await renderOpenCodeModelSummary(activeModel, config.model);
+        await ctx.reply(summary.text, {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: chunkButtons(summary.quickButtons),
+          },
+        });
+        return;
+      }
+
+      const lowerArg = arg.toLowerCase();
+      if (lowerArg === "free" || lowerArg === "list" || lowerArg === "all") {
+        await ctx.reply(await renderOpenCodeModelList(lowerArg === "free" ? "free" : "all"), {
+          parse_mode: "HTML",
+        });
+        return;
+      }
+
+      if (lowerArg === "providers") {
+        await ctx.reply(await renderOpenCodeModelList("providers"), {
+          parse_mode: "HTML",
+        });
+        return;
+      }
+
+      if (lowerArg === "reset" || lowerArg === "default") {
+        setChatModel(cid, undefined);
+        await ctx.reply(
+          `Model reset to default: <code>${escapeHtml(config.model)}</code>`,
+          { parse_mode: "HTML" },
+        );
+        return;
+      }
+
+      const { catalog, resolution } = await resolveOpenCodeModelSelection(arg);
+      if (resolution.kind !== "exact") {
+        await ctx.reply(formatOpenCodeSelectionError(arg, resolution, catalog), {
+          parse_mode: "HTML",
+        });
+        return;
+      }
+
+      if (!resolution.model.selectable) {
+        await ctx.reply(formatOpenCodeUnavailableModel(resolution.model), {
+          parse_mode: "HTML",
+        });
+        return;
+      }
+
+      const storedModel = getOpenCodeModelSelectionValue(
+        resolution.model,
+        catalog,
+      );
+      setChatModel(cid, storedModel);
+      await ctx.reply(
+        `Model set to <code>${escapeHtml(storedModel)}</code> (${escapeHtml(
+          resolution.model.providerName,
+        )}${resolution.model.free ? " · free" : ""}).`,
+        {
+          parse_mode: "HTML",
+        },
+      );
+      return;
+    }
 
     if (!arg) {
-      const current = settings.model ?? config.model;
+      const current = activeModel;
       const isModel = (id: string) => current.includes(id);
       await ctx.reply(
         `<b>Model:</b> <code>${escapeHtml(current)}</code>\nSelect a model:`,
@@ -382,6 +473,14 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     const activeModel = chatSets.model ?? config.model;
     const effortName = chatSets.effort ?? "adaptive";
     const pulseOn = isPulseEnabled(cid);
+    let modelDetails: Array<string> | undefined;
+    let modelButtons: Array<TelegramInlineButton> | undefined;
+
+    if (config.backend === "opencode") {
+      const presentation = await getOpenCodeSettingsPresentation(activeModel);
+      modelDetails = presentation.modelDetails;
+      modelButtons = presentation.modelButtons;
+    }
 
     await ctx.reply(
       renderSettingsText(
@@ -389,6 +488,7 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
         effortName,
         pulseOn,
         chatSets.pulseIntervalMs,
+        modelDetails,
       ),
       {
         parse_mode: "HTML",
@@ -397,6 +497,7 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
             activeModel,
             effortName,
             pulseOn,
+            modelButtons,
           ),
         },
       },
@@ -424,8 +525,47 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     const effortName = chatSets.effort ?? "adaptive";
     const pulseOn = isPulseEnabled(cid);
 
-    const contextMax = activeModel.includes("haiku") ? 200_000 : 1_000_000;
-    const contextUsed = u.lastPromptTokens;
+    let contextMax = activeModel.includes("haiku") ? 200_000 : 1_000_000;
+    let contextUsed = u.lastPromptTokens;
+    let displayInputTokens = u.totalInputTokens;
+    let displayOutputTokens = u.totalOutputTokens;
+    let displayCacheRead = u.totalCacheRead;
+    let displayCacheWrite = u.totalCacheWrite;
+    let turnsModelLabel = info.lastModel;
+
+    if (config.backend === "opencode") {
+      const {
+        getOpenCodeModelInfo,
+        getOpenCodeSessionSnapshot,
+      } = await import("../../backend/opencode/index.js");
+      const activeModelInfo = await getOpenCodeModelInfo(activeModel).catch(
+        () => undefined,
+      );
+      const sessionSnapshot = info.sessionId
+        ? await getOpenCodeSessionSnapshot(info.sessionId).catch(() => undefined)
+        : undefined;
+      const liveUsage = sessionSnapshot?.usage;
+
+      displayInputTokens = liveUsage?.totalInputTokens ?? displayInputTokens;
+      displayOutputTokens = liveUsage?.totalOutputTokens ?? displayOutputTokens;
+      displayCacheRead = liveUsage?.totalCacheRead ?? displayCacheRead;
+      displayCacheWrite = liveUsage?.totalCacheWrite ?? displayCacheWrite;
+
+      const contextModelID =
+        sessionSnapshot?.assistant?.modelID ?? info.lastModel ?? activeModel;
+      turnsModelLabel = contextModelID;
+      const contextModelInfo =
+        contextModelID === activeModel
+          ? activeModelInfo
+          : await getOpenCodeModelInfo(contextModelID).catch(() => undefined);
+      contextMax = contextModelInfo?.contextWindow ?? contextMax;
+      contextUsed = sessionSnapshot?.assistant
+        ? sessionSnapshot.assistant.inputTokens +
+          sessionSnapshot.assistant.cacheRead +
+          sessionSnapshot.assistant.cacheWrite
+        : contextUsed;
+    }
+
     const contextPct =
       contextMax > 0
         ? Math.min(100, Math.round((contextUsed / contextMax) * 100))
@@ -437,9 +577,9 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
     const contextWarn = contextPct >= 80 ? " \u26A0\uFE0F consider /reset" : "";
 
     const totalPrompt =
-      u.totalInputTokens + u.totalCacheRead + u.totalCacheWrite;
+      displayInputTokens + displayCacheRead + displayCacheWrite;
     const cacheHitPct =
-      totalPrompt > 0 ? Math.round((u.totalCacheRead / totalPrompt) * 100) : 0;
+      totalPrompt > 0 ? Math.round((displayCacheRead / totalPrompt) * 100) : 0;
 
     const avgResponseMs =
       info.turns > 0 && u.totalResponseMs
@@ -460,11 +600,11 @@ export function registerCommands(bot: Bot, config: TalonConfig): void {
       "",
       `<b>Session Stats</b>`,
       `  Response  last ${lastResponseMs ? formatDuration(lastResponseMs) : "\u2014"} \u00B7 avg ${avgResponseMs ? formatDuration(avgResponseMs) : "\u2014"} \u00B7 best ${fastestMs ? formatDuration(fastestMs) : "\u2014"}`,
-      `  Turns     ${info.turns}${info.lastModel ? ` (${info.lastModel.replace("claude-", "")})` : ""}`,
+      `  Turns     ${info.turns}${turnsModelLabel ? ` (${turnsModelLabel.replace("claude-", "")})` : ""}`,
       "",
       `<b>Cache</b>     ${cacheHitPct}% hit`,
-      `  Read ${formatTokenCount(u.totalCacheRead)}  Write ${formatTokenCount(u.totalCacheWrite)}`,
-      `  Input ${formatTokenCount(u.totalInputTokens)}  Output ${formatTokenCount(u.totalOutputTokens)}`,
+      `  Read ${formatTokenCount(displayCacheRead)}  Write ${formatTokenCount(displayCacheWrite)}`,
+      `  Input ${formatTokenCount(displayInputTokens)}  Output ${formatTokenCount(displayOutputTokens)}`,
       "",
       `<b>Pulse</b>  ${pulseOn ? "on" : "off"}`,
       `<b>Workspace</b>  ${diskStr}`,

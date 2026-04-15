@@ -1293,9 +1293,9 @@ export function stopOpenCodeServer(): void {
   if (serverHandle) {
     serverHandle.close();
     serverHandle = null;
-    client = null;
     log("agent", "OpenCode server stopped");
   }
+  client = null;
 }
 
 // ── Session management ──────────────────────────────────────────────────────

@@ -43,16 +43,17 @@ import {
   enablePulse,
   isPulseEnabled,
 } from "../../core/pulse.js";
-import {
-  isInteractionAllowed,
-  registerDiscordChat,
-} from "./handlers.js";
+import { isInteractionAllowed, registerDiscordChat } from "./handlers.js";
 import { renderSettingsText } from "./helpers.js";
 import { execute } from "../../core/dispatcher.js";
 import { deriveNumericChatId } from "../../util/chat-id.js";
 import { appendDailyLog } from "../../storage/daily-log.js";
 import { logError } from "../../util/log.js";
-import { suppressMentions, splitMessage, DISCORD_MAX_TEXT } from "./formatting.js";
+import {
+  suppressMentions,
+  splitMessage,
+  DISCORD_MAX_TEXT,
+} from "./formatting.js";
 
 type ComponentInteraction = ButtonInteraction | StringSelectMenuInteraction;
 
@@ -199,11 +200,14 @@ export async function handleComponentInteraction(
       setChatEffort(chatId, level as EffortLevel);
     const current = getChatSettings(chatId).effort ?? "adaptive";
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      ...(["off", "low", "medium", "high", "max", "adaptive"] as const).map((v) =>
-        new ButtonBuilder()
-          .setCustomId(`effort:${v}`)
-          .setLabel(current === v ? `✓ ${v}` : v)
-          .setStyle(current === v ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      ...(["off", "low", "medium", "high", "max", "adaptive"] as const).map(
+        (v) =>
+          new ButtonBuilder()
+            .setCustomId(`effort:${v}`)
+            .setLabel(current === v ? `✓ ${v}` : v)
+            .setStyle(
+              current === v ? ButtonStyle.Primary : ButtonStyle.Secondary,
+            ),
       ),
     );
     try {

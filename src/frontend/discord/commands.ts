@@ -82,7 +82,11 @@ import {
 } from "./handlers.js";
 import { deriveNumericChatId } from "../../util/chat-id.js";
 import { log, logError, logWarn } from "../../util/log.js";
-import { suppressMentions, splitMessage, DISCORD_MAX_TEXT } from "./formatting.js";
+import {
+  suppressMentions,
+  splitMessage,
+  DISCORD_MAX_TEXT,
+} from "./formatting.js";
 
 // ── Slash command definitions ───────────────────────────────────────────────
 
@@ -116,7 +120,10 @@ function buildCommandDefinitions(): unknown[] {
       .setName("model")
       .setDescription("Show or change the model")
       .addStringOption((o) =>
-        o.setName("name").setDescription("Model name or 'reset'").setRequired(false),
+        o
+          .setName("name")
+          .setDescription("Model name or 'reset'")
+          .setRequired(false),
       )
       .toJSON(),
     new SlashCommandBuilder()
@@ -213,9 +220,14 @@ export async function registerCommandsForGuilds(
       await rest.put(Routes.applicationCommands(dc.applicationId), {
         body: dmDefs,
       });
-      log("discord", `Registered ${dmDefs.length} global commands (DM-enabled)`);
+      log(
+        "discord",
+        `Registered ${dmDefs.length} global commands (DM-enabled)`,
+      );
     } else {
-      await rest.put(Routes.applicationCommands(dc.applicationId), { body: [] });
+      await rest.put(Routes.applicationCommands(dc.applicationId), {
+        body: [],
+      });
       log("discord", "Cleared global commands (DM commands disabled)");
     }
   } catch (err) {
@@ -231,7 +243,10 @@ export async function registerCommandsForGuilds(
         Routes.applicationGuildCommands(dc.applicationId, guildId),
         { body: definitions },
       );
-      log("discord", `Registered ${definitions.length} commands in guild ${guildId}`);
+      log(
+        "discord",
+        `Registered ${definitions.length} commands in guild ${guildId}`,
+      );
     } catch (err) {
       logError(
         "discord",
@@ -470,7 +485,10 @@ async function handleMemory(i: ChatInputCommandInteraction): Promise<void> {
   try {
     const memoryPath = files.memory;
     if (!existsSync(memoryPath)) {
-      await reply(i, "No memory file yet. I'll create one as I learn about you.");
+      await reply(
+        i,
+        "No memory file yet. I'll create one as I learn about you.",
+      );
       return;
     }
     const content = readFileSync(memoryPath, "utf-8").trim();
@@ -493,9 +511,7 @@ async function handlePing(i: ChatInputCommandInteraction): Promise<void> {
   await i.deferReply();
   const latency = Date.now() - start;
   const uptime = formatDuration(process.uptime() * 1000);
-  await i.editReply(
-    `Pong! ${latency}ms\nGateway: ✓ | Uptime: ${uptime}`,
-  );
+  await i.editReply(`Pong! ${latency}ms\nGateway: ✓ | Uptime: ${uptime}`);
 }
 
 async function handleReset(
@@ -618,7 +634,11 @@ async function handleModel(
   const activeModel = getChatSettings(chatId).model ?? config.model;
   const be = gateway?.backend;
 
-  if (!arg || arg.toLowerCase() === "reset" || arg.toLowerCase() === "default") {
+  if (
+    !arg ||
+    arg.toLowerCase() === "reset" ||
+    arg.toLowerCase() === "default"
+  ) {
     if (arg) {
       setChatModel(chatId, undefined);
       await reply(i, `Model reset to default: \`${config.model}\``);
@@ -627,7 +647,8 @@ async function handleModel(
     if (be?.getSettingsPresentation) {
       const pres = await be.getSettingsPresentation(activeModel, "model:");
       const modelInfo = await be.getModelInfo?.(activeModel);
-      const displayName = modelInfo?.displayName ?? formatModelLabel(activeModel);
+      const displayName =
+        modelInfo?.displayName ?? formatModelLabel(activeModel);
 
       // Build select menu from buttons (Discord lets us put up to 25 options)
       const menu = new StringSelectMenuBuilder()
@@ -643,10 +664,7 @@ async function handleModel(
       const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
         menu,
       );
-      const lines = [
-        `**Model:** \`${displayName}\``,
-        ...pres.modelDetails,
-      ];
+      const lines = [`**Model:** \`${displayName}\``, ...pres.modelDetails];
       await i.reply({
         content: lines.join("\n"),
         components: [row],
@@ -695,11 +713,14 @@ async function handleEffort(
   if (!level) {
     const current = settings.effort ?? "adaptive";
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      ...(["off", "low", "medium", "high", "max", "adaptive"] as const).map((v) =>
-        new ButtonBuilder()
-          .setCustomId(`effort:${v}`)
-          .setLabel(current === v ? `✓ ${v}` : v)
-          .setStyle(current === v ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      ...(["off", "low", "medium", "high", "max", "adaptive"] as const).map(
+        (v) =>
+          new ButtonBuilder()
+            .setCustomId(`effort:${v}`)
+            .setLabel(current === v ? `✓ ${v}` : v)
+            .setStyle(
+              current === v ? ButtonStyle.Primary : ButtonStyle.Secondary,
+            ),
       ),
     );
     await i.reply({
@@ -712,7 +733,10 @@ async function handleEffort(
 
   if (level === "adaptive") {
     setChatEffort(chatId, undefined);
-    await reply(i, "Effort reset to **adaptive** (model decides when to think)");
+    await reply(
+      i,
+      "Effort reset to **adaptive** (model decides when to think)",
+    );
     return;
   }
   if (EFFORT_LEVELS.includes(level as EffortLevel)) {
@@ -720,7 +744,10 @@ async function handleEffort(
     await reply(i, `Effort set to **${level}**`);
     return;
   }
-  await reply(i, "Unknown level. Use: off, low, medium, high, max, or adaptive.");
+  await reply(
+    i,
+    "Unknown level. Use: off, low, medium, high, max, or adaptive.",
+  );
 }
 
 async function handlePulse(
@@ -769,7 +796,10 @@ async function handlePulse(
     setChatPulseInterval(chatId, intervalMs);
     enablePulse(chatId);
     registerChat(chatId);
-    await reply(i, `🔔 Pulse cooldown set to **${formatDuration(intervalMs)}**`);
+    await reply(
+      i,
+      `🔔 Pulse cooldown set to **${formatDuration(intervalMs)}**`,
+    );
     return;
   }
   if (intervalMs) {
@@ -791,9 +821,7 @@ async function handleSettings(
   const pulseOn = isPulseEnabled(chatId);
 
   let modelDetails: Array<string> | undefined;
-  let modelButtons:
-    | Array<{ text: string; callback_data: string }>
-    | undefined;
+  let modelButtons: Array<{ text: string; callback_data: string }> | undefined;
   if (gateway?.backend?.getSettingsPresentation) {
     const presentation =
       await gateway.backend.getSettingsPresentation(activeModel);
@@ -911,7 +939,9 @@ async function handleDream(i: ChatInputCommandInteraction): Promise<void> {
   forceDream()
     .then(async () => {
       const elapsed = formatDuration(Date.now() - start);
-      await i.editReply(`🌙 Dream complete — memory consolidated in ${elapsed}.`);
+      await i.editReply(
+        `🌙 Dream complete — memory consolidated in ${elapsed}.`,
+      );
     })
     .catch(async (err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
@@ -949,16 +979,10 @@ async function handleAdmin(
   const sub = i.options.getString("sub", true);
   const args = i.options.getString("args") ?? "";
   await i.deferReply();
-  await handleAdminSubcommand(
-    sub,
-    args,
-    config,
-    gateway,
-    async (text) => {
-      await i.followUp({
-        content: suppressMentions(text).slice(0, DISCORD_MAX_TEXT),
-        allowedMentions: { parse: [] },
-      });
-    },
-  );
+  await handleAdminSubcommand(sub, args, config, gateway, async (text) => {
+    await i.followUp({
+      content: suppressMentions(text).slice(0, DISCORD_MAX_TEXT),
+      allowedMentions: { parse: [] },
+    });
+  });
 }

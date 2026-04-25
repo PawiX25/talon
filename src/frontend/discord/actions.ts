@@ -38,10 +38,7 @@ import {
 import { withRetry } from "../../core/gateway.js";
 import type { Gateway } from "../../core/gateway.js";
 import type { ActionResult } from "../../core/types.js";
-import {
-  lookupDiscordChat,
-  sendChunked,
-} from "./handlers.js";
+import { lookupDiscordChat, sendChunked } from "./handlers.js";
 import { suppressMentions, DISCORD_MAX_TEXT } from "./formatting.js";
 import { logWarn, logError } from "../../util/log.js";
 
@@ -77,7 +74,12 @@ async function resolveChannel(
 
 function buildButtonRows(
   rows: Array<
-    Array<{ text: string; url?: string; callback_data?: string; style?: string }>
+    Array<{
+      text: string;
+      url?: string;
+      callback_data?: string;
+      style?: string;
+    }>
   >,
 ): ActionRowBuilder<ButtonBuilder>[] {
   const out: ActionRowBuilder<ButtonBuilder>[] = [];
@@ -94,7 +96,8 @@ function buildButtonRows(
           success: ButtonStyle.Success,
           danger: ButtonStyle.Danger,
         };
-        const style = styleMap[btn.style ?? "secondary"] ?? ButtonStyle.Secondary;
+        const style =
+          styleMap[btn.style ?? "secondary"] ?? ButtonStyle.Secondary;
         b.setStyle(style).setCustomId(
           (btn.callback_data || btn.text).slice(0, 100),
         );
@@ -140,9 +143,7 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
               ? body.reply_to
               : undefined;
         gateway.incrementMessages(chatId);
-        const ids = await withRetry(() =>
-          sendChunked(channel!, text, replyTo),
-        );
+        const ids = await withRetry(() => sendChunked(channel!, text, replyTo));
         return { ok: true, message_id: ids[0], message_ids: ids };
       }
 
@@ -235,7 +236,9 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
       case "send_chat_action": {
         // typing only — Discord typing indicator
         try {
-          await (channel as { sendTyping?: () => Promise<void> }).sendTyping?.();
+          await (
+            channel as { sendTyping?: () => Promise<void> }
+          ).sendTyping?.();
         } catch {
           /* ignore */
         }
@@ -245,7 +248,12 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
       case "send_message_with_buttons": {
         const text = String(body.text ?? "");
         const rows = body.rows as Array<
-          Array<{ text: string; url?: string; callback_data?: string; style?: string }>
+          Array<{
+            text: string;
+            url?: string;
+            callback_data?: string;
+            style?: string;
+          }>
         >;
         gateway.incrementMessages(chatId);
         const components = buildButtonRows(rows);
@@ -275,7 +283,11 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
             const c = await resolveChannel(client, chatId);
             if (c) await sendChunked(c, text);
           } catch (err) {
-            logError("discord", `Scheduled message failed (chat=${chatId})`, err);
+            logError(
+              "discord",
+              `Scheduled message failed (chat=${chatId})`,
+              err,
+            );
           }
           scheduledMessages.delete(scheduleId);
         }, delaySec * 1000);
@@ -321,7 +333,9 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
         const sent = await withRetry(
           () =>
             channel!.send({
-              content: caption ? suppressMentions(caption).slice(0, DISCORD_MAX_TEXT) : undefined,
+              content: caption
+                ? suppressMentions(caption).slice(0, DISCORD_MAX_TEXT)
+                : undefined,
               files: [file],
               allowedMentions: { parse: [] },
               reply: replyTo
@@ -426,15 +440,15 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
             member_count: 2,
           };
         }
-        const guildCh = ch as { guild?: { name: string; memberCount?: number } };
+        const guildCh = ch as {
+          guild?: { name: string; memberCount?: number };
+        };
         return {
           ok: true,
           id: ch.id,
           type: "channel",
           title:
-            (ch as { name?: string }).name ??
-            guildCh.guild?.name ??
-            "channel",
+            (ch as { name?: string }).name ?? guildCh.guild?.name ?? "channel",
           member_count: guildCh.guild?.memberCount,
         };
       }
@@ -451,14 +465,17 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
         const ch = channel!;
         if (ch.type === ChannelType.DM)
           return { ok: false, error: "DM has no members beyond participants" };
-        const guildCh = ch as { guild?: { members: { fetch: (id: string) => Promise<GuildMember> } } };
+        const guildCh = ch as {
+          guild?: { members: { fetch: (id: string) => Promise<GuildMember> } };
+        };
         if (!guildCh.guild)
           return { ok: false, error: "Channel has no guild context" };
         try {
           const m = await guildCh.guild.members.fetch(userId);
           return {
             ok: true,
-            status: m.bannable === false && m.kickable === false ? "owner" : "member",
+            status:
+              m.bannable === false && m.kickable === false ? "owner" : "member",
             user: {
               id: m.user.id,
               first_name: m.displayName,
@@ -477,13 +494,20 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
         const ch = channel!;
         if (ch.type === ChannelType.DM)
           return { ok: false, error: "DM has no admins" };
-        const guild = (ch as { guild?: { members: { fetch: () => Promise<Map<string, GuildMember>> } } }).guild;
+        const guild = (
+          ch as {
+            guild?: {
+              members: { fetch: () => Promise<Map<string, GuildMember>> };
+            };
+          }
+        ).guild;
         if (!guild) return { ok: false, error: "No guild context" };
         try {
           const all = await guild.members.fetch();
-          const admins = [...all.values()].filter((m) =>
-            m.permissions.has("Administrator") ||
-            m.permissions.has("ManageGuild"),
+          const admins = [...all.values()].filter(
+            (m) =>
+              m.permissions.has("Administrator") ||
+              m.permissions.has("ManageGuild"),
           );
           const text = admins
             .map((a) => `${a.displayName} (@${a.user.username}) id:${a.id}`)
@@ -501,7 +525,11 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
         const title = String(body.title ?? "");
         const ch = channel!;
         try {
-          if ("setName" in ch && typeof (ch as { setName: (n: string) => unknown }).setName === "function") {
+          if (
+            "setName" in ch &&
+            typeof (ch as { setName: (n: string) => unknown }).setName ===
+              "function"
+          ) {
             await (ch as { setName: (n: string) => Promise<unknown> }).setName(
               title,
             );
@@ -525,9 +553,9 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
             typeof (ch as { setTopic: (t: string) => unknown }).setTopic ===
               "function"
           ) {
-            await (ch as { setTopic: (t: string) => Promise<unknown> }).setTopic(
-              description,
-            );
+            await (
+              ch as { setTopic: (t: string) => Promise<unknown> }
+            ).setTopic(description);
             return { ok: true };
           }
           return {
@@ -576,7 +604,8 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
                 : m.member?.displayName ||
                   m.author.globalName ||
                   m.author.username;
-            const text = m.content || (m.attachments.size ? "(attachment)" : "");
+            const text =
+              m.content || (m.attachments.size ? "(attachment)" : "");
             return `[${who}] msg_id:${m.id}: ${text.slice(0, 500)}`;
           });
           return { ok: true, text: lines.join("\n") };
@@ -595,9 +624,7 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
             .slice(0, limit);
           const lines = matches.map((m) => {
             const who =
-              m.member?.displayName ||
-              m.author.globalName ||
-              m.author.username;
+              m.member?.displayName || m.author.globalName || m.author.username;
             return `[${who}] msg_id:${m.id}: ${m.content.slice(0, 300)}`;
           });
           return {
@@ -613,7 +640,13 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
         const ch = channel!;
         if (ch.type === ChannelType.DM)
           return { ok: true, text: "DM — only the participants are present." };
-        const guild = (ch as { guild?: { members: { fetch: () => Promise<Map<string, GuildMember>> } } }).guild;
+        const guild = (
+          ch as {
+            guild?: {
+              members: { fetch: () => Promise<Map<string, GuildMember>> };
+            };
+          }
+        ).guild;
         if (!guild) return { ok: false, error: "No guild context" };
         try {
           const limit = Math.min(200, Number(body.limit ?? 50));
@@ -636,7 +669,13 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
       case "get_member_info": {
         const userId = String(body.user_id ?? "");
         const ch = channel!;
-        const guild = (ch as { guild?: { members: { fetch: (id: string) => Promise<GuildMember> } } }).guild;
+        const guild = (
+          ch as {
+            guild?: {
+              members: { fetch: (id: string) => Promise<GuildMember> };
+            };
+          }
+        ).guild;
         if (!guild) return { ok: false, error: "No guild context" };
         try {
           const m = await guild.members.fetch(userId);
@@ -666,7 +705,11 @@ export function createDiscordActionHandler(client: Client, gateway: Gateway) {
         const ch = channel!;
         if (ch.type === ChannelType.DM)
           return { ok: true, text: "DM has no online concept." };
-        const guild = (ch as { guild?: { approximatePresenceCount?: number; memberCount?: number } }).guild;
+        const guild = (
+          ch as {
+            guild?: { approximatePresenceCount?: number; memberCount?: number };
+          }
+        ).guild;
         if (!guild) return { ok: false, error: "No guild context" };
         return {
           ok: true,

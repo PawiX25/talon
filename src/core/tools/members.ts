@@ -20,7 +20,7 @@ export const memberTools: ToolDefinition[] = [
   {
     name: "get_member_info",
     description: "Get detailed info about a user by ID.",
-    schema: { user_id: idSchema },
+    schema: { user_id: z.union([z.number(), z.string()]) },
     execute: (params, bridge) => bridge("get_member_info", params),
     frontends: ["telegram", "discord"],
     tag: "members",

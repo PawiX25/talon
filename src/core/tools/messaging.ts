@@ -122,7 +122,7 @@ Examples:
         .string()
         .optional()
         .describe("Message text (for type=text). Supports Markdown."),
-      reply_to: idSchema.optional().describe("Message ID to reply to"),
+      reply_to: z.union([z.number(), z.string()]).optional().describe("Message ID to reply to"),
       file_path: z
         .string()
         .optional()
@@ -350,7 +350,7 @@ Pass \`end_turn: false\` if you want to react now and keep working on something 
 
 Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 🐳 ❤‍🔥 🌚 🌭 💯 🤣 ⚡ 🍌 🏆 💔 🤨 😐 🍓 🍾 💋 🖕 😈 😴 😭 🤓 👻 👨‍💻 👀 🎃 🙈 😇 😨 🤝 ✍ 🤗 🫡 🎅 🎄 ☃ 💅 🤪 🗿 🆒 💘 🙉 🦄 😘 💊 🙊 😎 👾 🤷 🤷‍♂ 🤷‍♀ 😡`,
     schema: {
-      message_id: idSchema.describe("Message ID"),
+      message_id: z.union([z.number(), z.string()]).describe("Message ID"),
       emoji: z.string().describe("Reaction emoji"),
       end_turn: z
         .boolean()
@@ -381,7 +381,7 @@ Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 �
   {
     name: "edit_message",
     description: "Edit a previously sent message.",
-    schema: { message_id: idSchema, text: z.string() },
+    schema: { message_id: z.union([z.number(), z.string()]), text: z.string() },
     execute: (params, bridge) => bridge("edit_message", params),
     frontends: ["telegram", "discord"],
     tag: "messaging",
@@ -391,7 +391,7 @@ Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 �
   {
     name: "delete_message",
     description: "Delete a message.",
-    schema: { message_id: idSchema },
+    schema: { message_id: z.union([z.number(), z.string()]) },
     execute: (params, bridge) => bridge("delete_message", params),
     frontends: ["telegram", "discord"],
     tag: "messaging",
@@ -401,7 +401,7 @@ Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 �
   {
     name: "forward_message",
     description: "Forward a message within the chat.",
-    schema: { message_id: idSchema },
+    schema: { message_id: z.union([z.number(), z.string()]) },
     execute: (params, bridge) => bridge("forward_message", params),
     frontends: ["telegram", "discord"],
     tag: "messaging",
@@ -411,7 +411,7 @@ Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 �
   {
     name: "pin_message",
     description: "Pin a message.",
-    schema: { message_id: idSchema },
+    schema: { message_id: z.union([z.number(), z.string()]) },
     execute: (params, bridge) => bridge("pin_message", params),
     frontends: ["telegram", "discord"],
     tag: "messaging",
@@ -421,7 +421,7 @@ Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 �
   {
     name: "unpin_message",
     description: "Unpin a message.",
-    schema: { message_id: idSchema.optional() },
+    schema: { message_id: z.union([z.number(), z.string()]).optional() },
     execute: (params, bridge) => bridge("unpin_message", params),
     frontends: ["telegram", "discord"],
     tag: "messaging",
@@ -433,7 +433,7 @@ Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 �
     description:
       "Stop an active poll and get the final results. Returns vote counts for each option.",
     schema: {
-      message_id: idSchema.describe("Message ID of the poll to stop"),
+      message_id: z.union([z.number(), z.string()]).describe("Message ID of the poll to stop"),
     },
     execute: (params, bridge) => bridge("stop_poll", params),
     frontends: ["telegram"],

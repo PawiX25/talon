@@ -27,7 +27,7 @@ export const historyTools: ToolDefinition[] = [
         before: params.before,
         offset_id: params.offset_id,
       }),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "history",
   },
 
@@ -39,7 +39,7 @@ export const historyTools: ToolDefinition[] = [
       limit: z.number().optional(),
     },
     execute: (params, bridge) => bridge("search_history", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "history",
   },
 
@@ -51,7 +51,7 @@ export const historyTools: ToolDefinition[] = [
       limit: z.number().optional(),
     },
     execute: (params, bridge) => bridge("get_user_messages", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "history",
   },
 
@@ -60,7 +60,7 @@ export const historyTools: ToolDefinition[] = [
     description: "Get a specific message by ID.",
     schema: { message_id: z.number() },
     execute: (params, bridge) => bridge("get_message_by_id", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "history",
   },
 
@@ -74,7 +74,7 @@ export const historyTools: ToolDefinition[] = [
         .describe("Message ID containing the media to download"),
     },
     execute: (params, bridge) => bridge("download_media", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "history",
   },
 ];

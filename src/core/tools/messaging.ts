@@ -177,7 +177,7 @@ Examples:
           return { ok: false, error: `Unknown type: ${type}` };
       }
     },
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "messaging",
   },
 
@@ -231,7 +231,7 @@ Example: send_message_with_buttons(text="Choose:", rows=[[{"text":"Docs","url":"
       emoji: z.string().describe("Reaction emoji"),
     },
     execute: (params, bridge) => bridge("react", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "messaging",
   },
 
@@ -241,7 +241,7 @@ Example: send_message_with_buttons(text="Choose:", rows=[[{"text":"Docs","url":"
     description: "Edit a previously sent message.",
     schema: { message_id: z.number(), text: z.string() },
     execute: (params, bridge) => bridge("edit_message", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "messaging",
   },
 
@@ -251,7 +251,7 @@ Example: send_message_with_buttons(text="Choose:", rows=[[{"text":"Docs","url":"
     description: "Delete a message.",
     schema: { message_id: z.number() },
     execute: (params, bridge) => bridge("delete_message", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "messaging",
   },
 
@@ -261,7 +261,7 @@ Example: send_message_with_buttons(text="Choose:", rows=[[{"text":"Docs","url":"
     description: "Forward a message within the chat.",
     schema: { message_id: z.number() },
     execute: (params, bridge) => bridge("forward_message", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "messaging",
   },
 
@@ -271,7 +271,7 @@ Example: send_message_with_buttons(text="Choose:", rows=[[{"text":"Docs","url":"
     description: "Pin a message.",
     schema: { message_id: z.number() },
     execute: (params, bridge) => bridge("pin_message", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "messaging",
   },
 
@@ -281,7 +281,7 @@ Example: send_message_with_buttons(text="Choose:", rows=[[{"text":"Docs","url":"
     description: "Unpin a message.",
     schema: { message_id: z.number().optional() },
     execute: (params, bridge) => bridge("unpin_message", params),
-    frontends: ["telegram"],
+    frontends: ["telegram", "discord"],
     tag: "messaging",
   },
 

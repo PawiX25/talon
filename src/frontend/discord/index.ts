@@ -19,7 +19,10 @@ import type { ContextManager } from "../../core/types.js";
 import type { Gateway } from "../../core/gateway.js";
 import { log, logError, logWarn } from "../../util/log.js";
 import { createDiscordActionHandler } from "./actions.js";
-import { registerCommandsForGuilds, registerInteractionRouter } from "./commands.js";
+import {
+  registerCommandsForGuilds,
+  registerInteractionRouter,
+} from "./commands.js";
 import { registerMiddleware } from "./middleware.js";
 import {
   setAccessControl,
@@ -113,7 +116,11 @@ export function createDiscordFrontend(
     }
     try {
       const ch = await client.channels.fetch(info.channelId);
-      if (ch && "isSendable" in ch && (ch as { isSendable: () => boolean }).isSendable()) {
+      if (
+        ch &&
+        "isSendable" in ch &&
+        (ch as { isSendable: () => boolean }).isSendable()
+      ) {
         await sendChunked(ch as never, text);
       }
     } catch (err) {
@@ -215,7 +222,10 @@ export function createDiscordFrontend(
       // guildCreate: bot was added to a new guild → enforce whitelist immediately
       client.on("guildCreate", async (guild) => {
         if (dc.allowedGuilds.includes(guild.id)) {
-          log("discord", `Joined whitelisted guild "${guild.name}" (${guild.id})`);
+          log(
+            "discord",
+            `Joined whitelisted guild "${guild.name}" (${guild.id})`,
+          );
           // Re-register commands for this guild
           try {
             await registerCommandsForGuilds(client, config);

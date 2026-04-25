@@ -77,9 +77,8 @@ export async function handleAdminSubcommand(
     case "logs": {
       const logPath = files.log;
       try {
-        const { statSync, openSync, readSync, closeSync } = await import(
-          "node:fs"
-        );
+        const { statSync, openSync, readSync, closeSync } =
+          await import("node:fs");
         const stat = statSync(logPath);
         const size = Math.min(8192, stat.size);
         const buf = Buffer.alloc(size);

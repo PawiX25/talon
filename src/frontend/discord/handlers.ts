@@ -14,12 +14,7 @@
 
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type {
-  Client,
-  Message,
-  Attachment,
-  TextBasedChannel,
-} from "discord.js";
+import type { Client, Message, Attachment, TextBasedChannel } from "discord.js";
 import { ChannelType } from "discord.js";
 import type { TalonConfig } from "../../util/config.js";
 import { execute } from "../../core/dispatcher.js";
@@ -166,9 +161,7 @@ async function notifyUnauthorized(
   }
   unauthorizedCooldown.set(key, now);
 
-  const senderTag = msg.author.username
-    ? ` (@${msg.author.username})`
-    : "";
+  const senderTag = msg.author.username ? ` (@${msg.author.username})` : "";
   const senderName = msg.author.globalName || msg.author.username || "User";
 
   // Warn the user
@@ -283,8 +276,7 @@ export function shouldHandleInGuild(client: Client, msg: Message): boolean {
   const botId = client.user?.id;
   const mentioned = botId ? msg.mentions.users.has(botId) : false;
   const repliedToBot =
-    msg.reference?.messageId &&
-    msg.mentions.repliedUser?.id === botId;
+    msg.reference?.messageId && msg.mentions.repliedUser?.id === botId;
 
   if (access.respondMode === "channel" && access.allowedChannels.size > 0) {
     return access.allowedChannels.has(msg.channelId);
@@ -329,9 +321,7 @@ export function isUserRateLimited(senderId: string): boolean {
 
 export function getSenderName(msg: Message): string {
   return (
-    (msg.member?.displayName ||
-      msg.author.globalName ||
-      msg.author.username) ??
+    (msg.member?.displayName || msg.author.globalName || msg.author.username) ??
     "User"
   );
 }
@@ -609,7 +599,11 @@ async function flushQueue(chatId: string): Promise<void> {
         return;
       }
     }
-    await sendChunked(last.channel, friendlyMessage(classified), last.replyToId);
+    await sendChunked(
+      last.channel,
+      friendlyMessage(classified),
+      last.replyToId,
+    );
   }
 }
 

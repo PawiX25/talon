@@ -98,7 +98,49 @@ const pluginEntrySchema = z
   })
   .pipe(z.union([pluginPathSchema, pluginMcpSchema]));
 
-const frontendEnum = z.enum(["telegram", "terminal", "teams"]);
+const frontendEnum = z.enum(["telegram", "terminal", "teams", "discord"]);
+
+// Discord snowflake validator — string of 17–20 digits.
+const discordSnowflake = z
+  .string()
+  .regex(/^\d{17,20}$/, "Must be a Discord snowflake (17–20 digits).");
+
+const discordConfigSchema = z
+  .object({
+    /** Bot token from Discord Developer Portal. Required. */
+    botToken: z.string().min(20),
+    /** Discord application ID (snowflake). Required for slash command registration. */
+    applicationId: discordSnowflake,
+    /** Admin user IDs (snowflakes). Admin-only commands check membership here. */
+    adminUserIds: z.array(discordSnowflake).default([]),
+    /** Whitelist of user IDs allowed to DM the bot. Empty = no one is allowed in DM. */
+    allowedUsers: z.array(discordSnowflake).default([]),
+    /** Whitelist of guild IDs the bot is permitted to operate in. */
+    allowedGuilds: z.array(discordSnowflake).default([]),
+    /** Optional: restrict to specific channels within allowed guilds. Empty = all channels. */
+    allowedChannels: z.array(discordSnowflake).default([]),
+    /** When the bot should respond in guilds: "mention" (only @mention/reply) or "channel" (any message in allowedChannels). */
+    respondMode: z.enum(["mention", "channel"]).default("mention"),
+    /** If true, register slash commands as global so they show up in DMs (filtered by allowedUsers). */
+    enableDmCommands: z.boolean().default(true),
+    /** If true, leave guilds that aren't on allowedGuilds when added. */
+    leaveUnauthorizedGuilds: z.boolean().default(true),
+    /** Bot status text shown under its name. */
+    presence: z.string().optional(),
+  })
+  .strict();
+
+const playwrightConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Browser engine: chromium (default), chrome, firefox, webkit, msedge */
+  browser: z.string().optional(),
+  /** Run headless (default: true) */
+  headless: z.boolean().default(true),
+  /** Connect to an existing browser websocket endpoint. */
+  endpoint: z.string().optional(),
+  /** Read the browser websocket endpoint from a file. */
+  endpointFile: z.string().optional(),
+});
 
 const playwrightConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -177,6 +219,9 @@ const configSchema = z.object({
   teamsChannelName: z.string().optional(),
   teamsChatTopic: z.string().optional(),
   teamsGraphPollMs: z.number().int().min(5000).default(10000),
+
+  // Discord frontend
+  discord: discordConfigSchema.optional(),
 });
 
 export type TalonConfig = z.infer<typeof configSchema> & {
@@ -427,6 +472,18 @@ export function loadConfig(): TalonConfig {
       throw new Error(
         `Teams frontend requires "teamsWebhookUrl" in ${CONFIG_FILE}. Run "talon setup" to configure.`,
       );
+    }
+    if (fe === "discord") {
+      if (!parsed.discord) {
+        throw new Error(
+          `Discord frontend requires a "discord" config block in ${CONFIG_FILE} (botToken, applicationId, allowedGuilds, allowedUsers, adminUserIds).`,
+        );
+      }
+      if (parsed.discord.allowedGuilds.length === 0) {
+        throw new Error(
+          `Discord config requires at least one entry in "allowedGuilds" (slash commands are registered per-guild).`,
+        );
+      }
     }
   }
 

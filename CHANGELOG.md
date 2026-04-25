@@ -1,50 +1,5 @@
 # Changelog
 
-## [1.11.0](https://github.com/dylanneve1/talon/compare/v1.10.1...v1.11.0) (2026-05-11)
-
-
-### Features
-
-* **access:** capture unauthorized message bodies for forensics ([#135](https://github.com/dylanneve1/talon/issues/135)) ([49e1029](https://github.com/dylanneve1/talon/commit/49e10292b05ee1508a8221ac964662b72f415bb5))
-
-
-### Bug Fixes
-
-* **deps:** bump fast-uri 3.1.0→3.1.2 (Dependabot alerts [#7](https://github.com/dylanneve1/talon/issues/7) + [#11](https://github.com/dylanneve1/talon/issues/11)) ([#134](https://github.com/dylanneve1/talon/issues/134)) ([0709805](https://github.com/dylanneve1/talon/commit/0709805e7258d0306a061b603192e87ea1c2669b))
-
-## [1.10.1](https://github.com/dylanneve1/talon/compare/v1.10.0...v1.10.1) (2026-05-09)
-
-
-### Bug Fixes
-
-* **claude-sdk:** terminate SDK loop on end_turn (MCP-prefix match + PostToolBatch hook) ([#122](https://github.com/dylanneve1/talon/issues/122)) ([a92452a](https://github.com/dylanneve1/talon/commit/a92452af146ee7f73d6c8771e6e1509d0c71bf3d))
-* **deps:** bump ip-address 10.1.0→10.2.0 to close Dependabot alert [#4](https://github.com/dylanneve1/talon/issues/4) ([#120](https://github.com/dylanneve1/talon/issues/120)) ([31b6f9d](https://github.com/dylanneve1/talon/commit/31b6f9d1761a5d2526c748ed15a17e042e4189c0))
-
-## [1.10.0](https://github.com/dylanneve1/talon/compare/v1.9.2...v1.10.0) (2026-05-08)
-
-
-### Features
-
-* **messaging:** add end_turn tool + flow enforcement ([#108](https://github.com/dylanneve1/talon/issues/108)) ([6a4f8ac](https://github.com/dylanneve1/talon/commit/6a4f8aca8d7ca8d9528ce04bac38bea94a3080a2))
-
-## [1.9.2](https://github.com/dylanneve1/talon/compare/v1.9.1...v1.9.2) (2026-05-07)
-
-
-### Bug Fixes
-
-* cache hit % shouldn't include cache writes in denominator ([#107](https://github.com/dylanneve1/talon/issues/107)) ([379eace](https://github.com/dylanneve1/talon/commit/379eace4b823bc824eed3f60242c396c1202752a))
-* **deps:** bump @anthropic-ai/sdk 0.86.1→0.95.0 to close Dependabot alert [#3](https://github.com/dylanneve1/talon/issues/3) ([#113](https://github.com/dylanneve1/talon/issues/113)) ([054516b](https://github.com/dylanneve1/talon/commit/054516be39e58fff1bac2ba42d0f2060c16ad06d))
-* **docker:** make container actually boot Talon end-to-end ([#106](https://github.com/dylanneve1/talon/issues/106)) ([f44d05c](https://github.com/dylanneve1/talon/commit/f44d05c7d688045a72a26cb68639dc6ff9be44c0))
-* **gateway:** don't leak error details on unhandled 500 ([#104](https://github.com/dylanneve1/talon/issues/104)) ([5a359db](https://github.com/dylanneve1/talon/commit/5a359db0ea1d09dee4f9017f2790aecf05f8a508))
-* **tools:** coerce stringified numeric IDs in tool input schemas ([#103](https://github.com/dylanneve1/talon/issues/103)) ([bd4b103](https://github.com/dylanneve1/talon/commit/bd4b10324419fcb41d35436a6ce8266523398032))
-
-## [1.9.1](https://github.com/dylanneve1/talon/compare/v1.9.0...v1.9.1) (2026-04-27)
-
-
-### Bug Fixes
-
-* **tools:** disallow ScheduleWakeup outside /loop mode ([#91](https://github.com/dylanneve1/talon/issues/91)) ([75b15f0](https://github.com/dylanneve1/talon/commit/75b15f0f1530fe3d457fc929317f40b649ef0ed2))
-
 ## [1.9.0](https://github.com/dylanneve1/talon/compare/v1.8.1...v1.9.0) (2026-04-21)
 
 

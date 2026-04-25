@@ -20,10 +20,6 @@ import { toYMD } from "../util/time.js";
 import { getPluginMcpServers } from "./plugin.js";
 import { DISALLOWED_TOOLS_BACKGROUND } from "./constants.js";
 import { getDefaultModel } from "./models.js";
-import {
-  buildMcpServers,
-  getActiveFrontends,
-} from "../backend/claude-sdk/index.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -338,26 +334,8 @@ async function runHeartbeatAgent(
     ...(configRef.claudeBinary
       ? { pathToClaudeCodeExecutable: configRef.claudeBinary }
       : {}),
-    // Load plugin MCP servers + frontend-tools so the heartbeat can send
-    // messages, react, and read chat history with an explicit `chat_id`.
-    // The frontend MCP server is spawned with TALON_CHAT_ID="heartbeat" —
-    // a sentinel string telling the bridge there's no ambient chat, so
-    // every outbound tool call MUST include `chat_id` in its params.
-    //
-    // `buildMcpServers` throws if the agent config hasn't been initialised
-    // (e.g. tests that mock the agent). Treat that case as "no frontend
-    // MCP available" rather than crashing the whole heartbeat — the
-    // plugin MCP servers still load and the agent runs normally.
-    mcpServers: {
-      ...(() => {
-        try {
-          return buildMcpServers("heartbeat");
-        } catch {
-          return {};
-        }
-      })(),
-      ...getPluginMcpServers("", "heartbeat"),
-    },
+    // Load all registered plugin MCP servers (excludes frontend-specific tools like telegram)
+    mcpServers: getPluginMcpServers("", "heartbeat"),
     disallowedTools: [...DISALLOWED_TOOLS_BACKGROUND],
   };
 

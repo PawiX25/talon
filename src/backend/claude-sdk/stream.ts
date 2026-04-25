@@ -34,33 +34,6 @@ export type StreamState = {
   sdkCacheRead: number;
   sdkCacheWrite: number;
   lastStreamUpdate: number;
-  /**
-   * Trailing text from the most recent assistant message — text after all
-   * tool_use blocks (or the full text when no tools were called). NOT
-   * delivered to the user (the output stream is private scratchpad by
-   * contract). Tracked so the handler can log a diagnostic when the model
-   * wrote prose without routing it through `end_turn` / `send` — surfaces
-   * missed end_turn calls in metrics rather than silently dropping content.
-   */
-  lastTrailingText: string;
-  /**
-   * Normalized text args observed on `end_turn` / `send(type="text")` tool
-   * calls during this turn. Cross-tool dedup: if both fire with similar
-   * content (e.g. model calls both with the same text mid-turn), the
-   * second one can be matched against this list to avoid the user seeing
-   * the same message twice. Also used to silence the trailing-prose
-   * diagnostic when the prose just duplicates what was already delivered.
-   */
-  deliveredTextNorms: string[];
-  /**
-   * Set when a tool with `endsTurn: true` (e.g. `end_turn`) was observed
-   * in this turn. Once true, the handler invokes `qi.interrupt()` to abort
-   * the SDK loop cleanly — the model can't produce more trailing scratchpad
-   * after this point. Also gates the flow-violation re-prompt: if the model
-   * explicitly ended its turn, we don't re-prompt for trailing prose that
-   * may have appeared in the same assistant message before the terminator.
-   */
-  turnTerminated: boolean;
 };
 
 export function createStreamState(): StreamState {
@@ -77,9 +50,6 @@ export function createStreamState(): StreamState {
     sdkCacheRead: 0,
     sdkCacheWrite: 0,
     lastStreamUpdate: 0,
-    lastTrailingText: "",
-    deliveredTextNorms: [],
-    turnTerminated: false,
   };
 }
 
@@ -253,41 +223,4 @@ export function processResultMessage(
   ) {
     state.currentBlockText = msg.result;
   }
-}
-
-// ── Trailing-text fallback dedup ────────────────────────────────────────────
-
-/**
- * Normalize text for fuzzy comparison — trim, lowercase, collapse whitespace,
- * strip emoji. Used to detect whether trailing prose duplicates content
- * already delivered via `end_turn` / `send(type="text")`.
- */
-export function normalizeForDedupe(text: string): string {
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/\p{Emoji_Presentation}|\p{Extended_Pictographic}/gu, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-const MIN_DEDUP_LENGTH = 10;
-
-/**
- * Returns true if `candidate` is substantively the same as any text in
- * `deliveredNorms`. "Substantively" = one is a substring of the other after
- * normalization; both must be at least MIN_DEDUP_LENGTH chars to avoid
- * dropping short legitimate replies.
- */
-export function isDuplicateOfDelivered(
-  candidate: string,
-  deliveredNorms: string[],
-): boolean {
-  if (deliveredNorms.length === 0) return false;
-  const norm = normalizeForDedupe(candidate);
-  if (norm.length < MIN_DEDUP_LENGTH) return false;
-  return deliveredNorms.some(
-    (d) =>
-      d.length >= MIN_DEDUP_LENGTH && (norm.includes(d) || d.includes(norm)),
-  );
 }

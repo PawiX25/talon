@@ -157,7 +157,8 @@ export type ActionResult = {
   ok: boolean;
   text?: string;
   error?: string;
-  message_id?: number;
+  /** Message ID — number for Telegram, string snowflake for Discord, varies by platform. */
+  message_id?: number | string;
   [key: string]: unknown;
 };
 

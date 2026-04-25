@@ -910,24 +910,10 @@ async function processAndReply(params: ProcessAndReplyParams): Promise<void> {
       !stream.sentTextBlock &&
       result.text?.trim()
     ) {
-      if (config.backend === "opencode") {
-        await sendHtml(
-          bot,
-          numericChatId,
-          markdownToTelegramHtml(result.text),
-          replyToId,
-        );
-        appendDailyLogResponse("Talon", result.text, { chatTitle });
-        log(
-          "bot",
-          `Delivered OpenCode fallback text (${result.text.length} chars)`,
-        );
-      } else {
-        log(
-          "bot",
-          `Suppressed fallback text (${result.text.length} chars) — no send tool used`,
-        );
-      }
+      log(
+        "bot",
+        `Suppressed fallback text (${result.text.length} chars) — no send tool used`,
+      );
     }
   } finally {
     clearTimeout(streamTimer);

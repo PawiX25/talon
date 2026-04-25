@@ -1,12 +1,17 @@
 /**
- * Shared helpers used by commands, callbacks, and the settings panel.
+ * Shared helpers for Discord commands, callbacks, and the settings panel.
+ *
+ * Discord-specific quirks vs the Telegram helpers:
+ *  - settings panel uses Components (Buttons + Select Menus), not inline keyboard.
+ *  - custom_id strings are limited to 100 chars total — keep payload compact.
+ *  - chat IDs are Discord snowflakes (strings), not numbers.
  */
 
-import { escapeHtml } from "./formatting.js";
 import type { ModelInfo } from "../../core/models.js";
 import { getModels, resolveModel, resolveModelId } from "../../core/models.js";
+
 const DEFAULT_PULSE_INTERVAL_MS = 5 * 60 * 1000;
-const DEFAULT_METRICS_MESSAGE_MAX = 3800;
+const DEFAULT_METRICS_MESSAGE_MAX = 1900; // discord 2000 char cap minus markdown overhead
 
 type MetricsSnapshot = {
   counters: Record<string, number>;
@@ -50,55 +55,50 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-/** Resolve a model ID to its backend-registered display name. */
 export function formatModelLabel(modelId: string): string {
   return resolveModel(modelId)?.displayName ?? modelId;
 }
 
-/** Display name for a known ModelInfo. */
-export function formatModelOptionLabel(model: ModelInfo): string {
-  return model.displayName;
-}
-
-/** Compact display name for a known ModelInfo. */
 export function formatCompactModelLabel(model: ModelInfo): string {
   return model.displayName;
 }
 
-export function getTelegramModelOptions(): ModelInfo[] {
+export function getDiscordModelOptions(): ModelInfo[] {
   const options: ModelInfo[] = [];
-  const seenKeys = new Set<string>();
-
+  const seen = new Set<string>();
   for (const model of getModels()) {
     const key = model.displayName.toLowerCase();
-    if (seenKeys.has(key)) continue;
-    seenKeys.add(key);
+    if (seen.has(key)) continue;
+    seen.add(key);
     options.push(model);
   }
-
   return options;
 }
 
-function truncateMetricLabel(label: string, max = 80): string {
+function truncateMetricLabel(label: string, max = 60): string {
   return label.length <= max ? label : `${label.slice(0, max - 3)}...`;
 }
 
+/**
+ * Render the metrics report into one or more Discord messages, each ≤ maxLen
+ * (default ~1900 chars to leave headroom under the 2000-char limit).
+ */
 export function renderMetricsMessages(
   metrics: MetricsSnapshot,
   maxLen = DEFAULT_METRICS_MESSAGE_MAX,
 ): string[] {
-  const firstHeader = "<b>📊 Metrics</b>";
-  const continuationHeader = "<b>📊 Metrics (cont.)</b>";
+  const firstHeader = "**📊 Metrics**";
+  const continuationHeader = "**📊 Metrics (cont.)**";
   const sections: string[][] = [];
 
   const histKeys = Object.keys(metrics.histograms).sort();
   if (histKeys.length > 0) {
     sections.push([
-      "<b>Latency</b>",
+      "**Latency**",
       ...histKeys.map((key) => {
         const h = metrics.histograms[key];
         return (
-          `  <code>${escapeHtml(truncateMetricLabel(key))}</code>  n=${h.count} ` +
+          `  \`${truncateMetricLabel(key)}\`  n=${h.count} ` +
           `p50=${formatDuration(h.p50)}  p95=${formatDuration(h.p95)} ` +
           `p99=${formatDuration(h.p99)}  avg=${formatDuration(h.avg)}`
         );
@@ -114,60 +114,51 @@ export function renderMetricsMessages(
       if (!groups.has(prefix)) groups.set(prefix, []);
       groups.get(prefix)!.push(key);
     }
-
     for (const prefix of [...groups.keys()].sort()) {
       const keys = groups.get(prefix)!;
       sections.push([
-        `<b>${escapeHtml(prefix)}</b>`,
+        `**${prefix}**`,
         ...keys.map((key) => {
           const label = key.includes(".")
             ? key.split(".").slice(1).join(".")
             : key;
-          return (
-            `  <code>${escapeHtml(truncateMetricLabel(label))}</code>  ` +
-            `${metrics.counters[key]!.toLocaleString()}`
-          );
+          return `  \`${truncateMetricLabel(label)}\`  ${metrics.counters[key]!.toLocaleString()}`;
         }),
       ]);
     }
   }
 
   if (sections.length === 0) {
-    return [`${firstHeader}\n\n<i>No metrics recorded yet.</i>`];
+    return [`${firstHeader}\n\n_No metrics recorded yet._`];
   }
 
   const chunks: string[] = [];
   let header = firstHeader;
   let current = header;
-
   const flush = () => {
     chunks.push(current);
     header = continuationHeader;
     current = header;
   };
-
   const appendLine = (line: string) => {
     if (!line && current === header) return;
-
     const candidate = `${current}\n${line}`;
     if (candidate.length <= maxLen) {
       current = candidate;
       return;
     }
-
     if (current !== header) {
       flush();
       if (!line) return;
     }
-
     const available = maxLen - header.length - 1;
-    if (available < 0) return; // header alone already fills maxLen — skip line
+    if (available < 0) return;
     const safeLine =
       line.length <= available
         ? line
         : available >= 4
           ? `${line.slice(0, available - 3)}...`
-          : line.slice(0, available); // not enough room for ellipsis — just truncate
+          : line.slice(0, available);
     current = `${current}\n${safeLine}`;
   };
 
@@ -175,14 +166,11 @@ export function renderMetricsMessages(
     appendLine("");
     for (const line of section) appendLine(line);
   }
-
-  if (current !== header || chunks.length === 0) {
-    chunks.push(current);
-  }
-
+  if (current !== header || chunks.length === 0) chunks.push(current);
   return chunks;
 }
 
+/** Settings panel: build the markdown body. */
 export function renderSettingsText(
   model: string,
   effort: string,
@@ -194,19 +182,16 @@ export function renderSettingsText(
     ? formatDuration(pulseIntervalMs)
     : formatDuration(DEFAULT_PULSE_INTERVAL_MS);
   return [
-    "<b>\uD83E\uDD85 Settings</b>",
+    "**🦅 Settings**",
     "",
-    `<b>Model:</b> <code>${escapeHtml(formatModelLabel(model))}</code>`,
+    `**Model:** \`${formatModelLabel(model)}\``,
     ...(modelDetails?.length ? modelDetails : []),
-    `<b>Effort:</b> ${effort}`,
-    `<b>Pulse:</b> ${proactive ? "on" : "off"} (every ${intervalStr})`,
+    `**Effort:** ${effort}`,
+    `**Pulse:** ${proactive ? "on" : "off"} (every ${intervalStr})`,
   ].join("\n");
 }
 
-export function isSelectedModel(
-  currentModel: string,
-  modelId: string,
-): boolean {
+export function isSelectedModel(currentModel: string, modelId: string): boolean {
   const current = resolveModel(currentModel);
   const candidate = resolveModel(modelId);
   if (current && candidate) {
@@ -215,55 +200,4 @@ export function isSelectedModel(
     );
   }
   return resolveModelId(currentModel) === modelId;
-}
-
-export type SettingsButton = { text: string; callback_data: string };
-
-export function renderSettingsKeyboard(
-  model: string,
-  effort: string,
-  proactive: boolean,
-  modelButtons?: Array<SettingsButton>,
-): Array<Array<SettingsButton>> {
-  const selectedButtons = modelButtons?.length
-    ? modelButtons
-    : getTelegramModelOptions().map((m) => ({
-        text: isSelectedModel(model, m.id)
-          ? `\u2713 ${formatCompactModelLabel(m)}`
-          : formatCompactModelLabel(m),
-        callback_data: `settings:model:${m.id}`,
-      }));
-  const cols = modelButtons?.length ? 2 : 3;
-  const modelRows: Array<Array<SettingsButton>> = [];
-  for (let i = 0; i < selectedButtons.length; i += cols) {
-    modelRows.push(selectedButtons.slice(i, i + cols));
-  }
-  return [
-    ...modelRows,
-    [
-      {
-        text: effort === "low" ? "\u2713 Low" : "Low",
-        callback_data: "settings:effort:low",
-      },
-      {
-        text: effort === "medium" ? "\u2713 Med" : "Med",
-        callback_data: "settings:effort:medium",
-      },
-      {
-        text: effort === "high" ? "\u2713 High" : "High",
-        callback_data: "settings:effort:high",
-      },
-      {
-        text: effort === "adaptive" ? "\u2713 Auto" : "Auto",
-        callback_data: "settings:effort:adaptive",
-      },
-    ],
-    [
-      {
-        text: proactive ? "Pulse: ON" : "Pulse: OFF",
-        callback_data: `settings:proactive:${proactive ? "off" : "on"}`,
-      },
-      { text: "Done", callback_data: "settings:done" },
-    ],
-  ];
 }

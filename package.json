@@ -1,6 +1,6 @@
 {
   "name": "talon-agent",
-  "version": "1.11.0",
+  "version": "1.9.0",
   "description": "Multi-frontend AI agent with full tool access, streaming, cron jobs, and plugin system",
   "author": "Dylan Neve",
   "license": "MIT",
@@ -67,7 +67,6 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.108",
-    "@anthropic-ai/sdk": "^0.95.0",
     "@brave/brave-search-mcp-server": "^2.0.75",
     "@clack/prompts": "^1.2.0",
     "@grammyjs/auto-retry": "^2.0.2",
@@ -78,6 +77,7 @@
     "big-integer": "^1.6.52",
     "cheerio": "^1.2.0",
     "croner": "^10.0.1",
+    "discord.js": "^14.26.3",
     "grammy": "^1.42.0",
     "marked": "^18.0.0",
     "p-retry": "^8.0.0",

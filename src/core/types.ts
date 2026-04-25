@@ -14,7 +14,7 @@ export type QueryParams = {
   text: string;
   senderName: string;
   isGroup?: boolean;
-  messageId?: number;
+  messageId?: number | string;
   onStreamDelta?: (accumulated: string, phase?: "thinking" | "text") => void;
   onTextBlock?: (text: string) => Promise<void>;
   onToolUse?: (toolName: string, input: Record<string, unknown>) => void;
@@ -138,8 +138,8 @@ export type ExecuteParams = {
   prompt: string;
   senderName: string;
   isGroup: boolean;
-  messageId?: number;
-  source: "message" | "pulse" | "cron" | "trigger";
+  messageId?: number | string;
+  source: "message" | "pulse" | "cron";
   onStreamDelta?: (accumulated: string, phase?: "thinking" | "text") => void;
   onTextBlock?: (text: string) => Promise<void>;
   onToolUse?: (toolName: string, input: Record<string, unknown>) => void;

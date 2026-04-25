@@ -649,7 +649,10 @@ async function processAndReply(p: ProcessAndReplyParams): Promise<void> {
     prompt: p.prompt,
     senderName: p.senderName,
     isGroup: p.isGroup,
-    messageId: p.numericMessageId,
+    // Use the real Discord snowflake string, not the hashed numeric.
+    // The hash collides with Telegram-style 32-bit IDs and Discord's API
+    // rejects it as "Unknown Message" when the model tries to react/edit.
+    messageId: p.messageId,
     source: "message",
     onTextBlock,
     onToolUse: (toolName, input) => {

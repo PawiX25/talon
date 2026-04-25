@@ -20,7 +20,10 @@ export const historyTools: ToolDefinition[] = [
         .string()
         .optional()
         .describe("Fetch messages before this date (ISO format)"),
-      offset_id: z.union([z.number(), z.string()]).optional().describe("Fetch before this message ID"),
+      offset_id: z
+        .union([z.number(), z.string()])
+        .optional()
+        .describe("Fetch before this message ID"),
     },
     execute: (params, bridge) =>
       bridge("read_history", {

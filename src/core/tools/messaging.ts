@@ -122,7 +122,10 @@ Examples:
         .string()
         .optional()
         .describe("Message text (for type=text). Supports Markdown."),
-      reply_to: z.union([z.number(), z.string()]).optional().describe("Message ID to reply to"),
+      reply_to: z
+        .union([z.number(), z.string()])
+        .optional()
+        .describe("Message ID to reply to"),
       file_path: z
         .string()
         .optional()
@@ -433,7 +436,9 @@ Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 �
     description:
       "Stop an active poll and get the final results. Returns vote counts for each option.",
     schema: {
-      message_id: z.union([z.number(), z.string()]).describe("Message ID of the poll to stop"),
+      message_id: z
+        .union([z.number(), z.string()])
+        .describe("Message ID of the poll to stop"),
     },
     execute: (params, bridge) => bridge("stop_poll", params),
     frontends: ["telegram"],

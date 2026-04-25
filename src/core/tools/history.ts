@@ -19,7 +19,7 @@ export const historyTools: ToolDefinition[] = [
         .string()
         .optional()
         .describe("Fetch messages before this date (ISO format)"),
-      offset_id: z.number().optional().describe("Fetch before this message ID"),
+      offset_id: z.union([z.number(), z.string()]).optional().describe("Fetch before this message ID"),
     },
     execute: (params, bridge) =>
       bridge("read_history", {
@@ -58,7 +58,7 @@ export const historyTools: ToolDefinition[] = [
   {
     name: "get_message_by_id",
     description: "Get a specific message by ID.",
-    schema: { message_id: z.number() },
+    schema: { message_id: z.union([z.number(), z.string()]) },
     execute: (params, bridge) => bridge("get_message_by_id", params),
     frontends: ["telegram", "discord"],
     tag: "history",
@@ -70,7 +70,7 @@ export const historyTools: ToolDefinition[] = [
       "Download a photo, document, or other media from a message by its ID. Saves the file to the workspace and returns the file path so you can read/analyze it. Use this when you see a [photo] or [document] in chat history but don't have the file.",
     schema: {
       message_id: z
-        .number()
+        .union([z.number(), z.string()])
         .describe("Message ID containing the media to download"),
     },
     execute: (params, bridge) => bridge("download_media", params),

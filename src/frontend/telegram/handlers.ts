@@ -8,10 +8,6 @@ import type { TalonConfig } from "../../util/config.js";
 import { markdownToTelegramHtml, escapeHtml } from "./formatting.js";
 import { execute } from "../../core/dispatcher.js";
 import { classify, friendlyMessage } from "../../core/errors.js";
-import {
-  enrichDMPrompt,
-  enrichGroupPrompt,
-} from "../../core/prompt-builder.js";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -21,7 +17,7 @@ import {
 import { setMessageFilePath } from "../../storage/history.js";
 import { addMedia } from "../../storage/media-index.js";
 import { recordMessageProcessed, recordError } from "../../util/watchdog.js";
-import { log, logError, logWarn } from "../../util/log.js";
+import { log, logError, logWarn, logDebug } from "../../util/log.js";
 
 // ── First-time DM user tracking ──────────────────────────────────────────────
 
@@ -52,7 +48,13 @@ function trackDmUser(
 
 let allowedUserIds: Set<number> | null = null; // null = no whitelist (allow all)
 let adminId = 0;
-const verifiedGroups = new Map<number, boolean>(); // chatId → admin is member
+// chatId → { isMember, expiresAt } — timestamp-based expiry, no timers
+const verifiedGroups = new Map<
+  number,
+  { isMember: boolean; expiresAt: number }
+>();
+const MAX_VERIFIED_GROUPS = 1000;
+const VERIFIED_GROUP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 export function setAccessControl(cfg: {
   allowedUsers?: number[];
@@ -76,19 +78,39 @@ function isDmAllowed(senderId: number | undefined): boolean {
 async function isAdminInGroup(bot: Bot, chatId: number): Promise<boolean> {
   if (!adminId) return true; // no admin configured, allow all groups
   const cached = verifiedGroups.get(chatId);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined && cached.expiresAt > Date.now()) {
+    return cached.isMember;
+  }
+  // Expired or missing — delete stale entry
+  if (cached) verifiedGroups.delete(chatId);
+
+  // Prevent unbounded growth — evict expired entries first, then clear if still over
+  if (verifiedGroups.size >= MAX_VERIFIED_GROUPS) {
+    const now = Date.now();
+    for (const [k, v] of verifiedGroups) {
+      if (v.expiresAt <= now) verifiedGroups.delete(k);
+    }
+    if (verifiedGroups.size >= MAX_VERIFIED_GROUPS) verifiedGroups.clear();
+  }
 
   try {
     const member = await bot.api.getChatMember(chatId, adminId);
     const isMember = !["left", "kicked"].includes(member.status);
-    verifiedGroups.set(chatId, isMember);
-    // Expire cache after 10 minutes
-    setTimeout(() => verifiedGroups.delete(chatId), 10 * 60 * 1000);
+    verifiedGroups.set(chatId, {
+      isMember,
+      expiresAt: Date.now() + VERIFIED_GROUP_TTL_MS,
+    });
     return isMember;
-  } catch {
+  } catch (err) {
+    logWarn(
+      "bot",
+      `isAdminInGroup check failed for chat ${chatId}: ${err instanceof Error ? err.message : err}`,
+    );
     // API error (e.g. bot can't query members) — deny by default
-    verifiedGroups.set(chatId, false);
-    setTimeout(() => verifiedGroups.delete(chatId), 10 * 60 * 1000);
+    verifiedGroups.set(chatId, {
+      isMember: false,
+      expiresAt: Date.now() + VERIFIED_GROUP_TTL_MS,
+    });
     return false;
   }
 }
@@ -111,6 +133,7 @@ export function shouldHandleInGroup(ctx: Context): boolean {
 // Rate-limit unauthorized access warnings (one per user/group per 10 minutes)
 const unauthorizedCooldown = new Map<string, number>();
 const UNAUTHORIZED_COOLDOWN_MS = 10 * 60 * 1000;
+const MAX_UNAUTHORIZED_COOLDOWNS = 5000;
 
 /**
  * Full access check: DM whitelist + group admin membership.
@@ -144,6 +167,9 @@ async function notifyUnauthorized(
   const now = Date.now();
   const lastWarned = unauthorizedCooldown.get(key);
   if (lastWarned && now - lastWarned < UNAUTHORIZED_COOLDOWN_MS) return;
+  if (unauthorizedCooldown.size >= MAX_UNAUTHORIZED_COOLDOWNS) {
+    unauthorizedCooldown.clear();
+  }
   unauthorizedCooldown.set(key, now);
 
   const sender = getSenderName(ctx.from);
@@ -244,7 +270,7 @@ export function getReplyContext(
 
 /**
  * If the replied-to message contains a photo, download it and return a prompt
- * line pointing to the saved file so Claude can see it. Returns "" if no photo.
+ * line pointing to the saved file so the model can see it. Returns "" if no photo.
  */
 async function downloadReplyPhoto(
   replyMsg:
@@ -333,7 +359,7 @@ async function downloadTelegramFile(
     throw new Error("Downloaded file is empty (0 bytes)");
 
   // Validate image files — prevent saving HTML/garbage as .jpg/.png
-  // (corrupt "images" poison the Claude session permanently on resume)
+  // (corrupt "images" poison the session permanently on resume)
   const imageExts = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
   const isImageExt = imageExts.some((ext) =>
     fileName.toLowerCase().endsWith(ext),
@@ -416,6 +442,7 @@ function isUserRateLimited(senderId: number): boolean {
   }
 
   if (timestamps.length >= RATE_LIMIT_MAX_MESSAGES) {
+    logDebug("bot", `Rate-limited user ${senderId}`);
     return true;
   }
 
@@ -604,7 +631,12 @@ async function sendHtml(
       "bot",
       `HTML send failed, falling back to plain text: ${err instanceof Error ? err.message : err}`,
     );
-    const plain = html.replace(/<[^>]+>/g, "");
+    let plain = html;
+    let prev: string;
+    do {
+      prev = plain;
+      plain = plain.replace(/<[^>]*>/g, "");
+    } while (plain !== prev);
     const sent = await bot.api.sendMessage(chatId, plain, {
       reply_parameters: replyToId ? { message_id: replyToId } : undefined,
     });
@@ -723,19 +755,15 @@ async function processAndReply(params: ProcessAndReplyParams): Promise<void> {
       stream,
     );
 
-    // Enrich prompt with sender context
-    let enrichedPrompt = prompt;
-    if (!isGroup && senderName) {
-      enrichedPrompt = enrichDMPrompt(prompt, senderName, senderUsername);
-      if (senderId) trackDmUser(senderId, senderName, senderUsername);
-    } else if (isGroup && senderId) {
-      enrichedPrompt = enrichGroupPrompt(prompt, String(chatId), senderId);
+    // Track first-time DM users for logging (no prompt mutation).
+    if (!isGroup && senderName && senderId) {
+      trackDmUser(senderId, senderName, senderUsername);
     }
 
     const result = await execute({
       chatId: String(chatId),
       numericChatId,
-      prompt: enrichedPrompt,
+      prompt,
       senderName,
       isGroup,
       messageId,
@@ -758,24 +786,10 @@ async function processAndReply(params: ProcessAndReplyParams): Promise<void> {
       !stream.sentTextBlock &&
       result.text?.trim()
     ) {
-      if (config.backend === "opencode") {
-        await sendHtml(
-          bot,
-          numericChatId,
-          markdownToTelegramHtml(result.text),
-          replyToId,
-        );
-        appendDailyLogResponse("Talon", result.text, { chatTitle });
-        log(
-          "bot",
-          `Delivered OpenCode fallback text (${result.text.length} chars)`,
-        );
-      } else {
-        log(
-          "bot",
-          `Suppressed fallback text (${result.text.length} chars) — no send tool used`,
-        );
-      }
+      log(
+        "bot",
+        `Suppressed fallback text (${result.text.length} chars) — no send tool used`,
+      );
     }
   } finally {
     clearTimeout(streamTimer);

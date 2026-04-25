@@ -49,6 +49,9 @@ const { classify, TalonError } = await import("../core/errors.js");
 await import("../storage/cron-store.js");
 const { handleSharedAction } = await import("../core/gateway-actions.js");
 const { resolveModelName } = await import("../storage/chat-settings.js");
+const { registerClaudeModelsStatic, CLAUDE_MODELS_STATIC } =
+  await import("../backend/claude-sdk/models.js");
+registerClaudeModelsStatic(CLAUDE_MODELS_STATIC);
 const { Cron } = await import("croner");
 
 // ── Configuration ───────────────────────────────────────────────────────────
@@ -321,25 +324,25 @@ describe("fuzz: resolveModelName()", () => {
     );
   });
 
-  it("known aliases always resolve to claude model names", () => {
-    const aliases = [
-      "sonnet",
-      "opus",
-      "haiku",
-      "sonnet-4.6",
-      "opus-4.6",
-      "haiku-4.5",
-      "sonnet-4-6",
-      "opus-4-6",
-      "haiku-4-5",
-    ];
+  it("known aliases resolve to the expected SDK model IDs", () => {
+    const aliasMappings = [
+      ["sonnet", "default"],
+      ["opus", "opus[1m]"],
+      ["haiku", "haiku"],
+      ["sonnet-4.6", "default"],
+      ["opus-4.6", "opus[1m]"],
+      ["haiku-4.5", "haiku"],
+      ["sonnet-4-6", "default"],
+      ["opus-4-6", "opus[1m]"],
+      ["haiku-4-5", "haiku"],
+    ] as const;
     fc.assert(
       fc.property(
-        fc.constantFrom(...aliases),
+        fc.constantFrom(...aliasMappings),
         fc.constantFrom("", " ", "  "),
-        (alias, padding) => {
+        ([alias, expectedModelId], padding) => {
           const result = resolveModelName(padding + alias + padding);
-          expect(result).toMatch(/^claude-/);
+          expect(result).toBe(expectedModelId);
         },
       ),
       fcParams,

@@ -3,7 +3,18 @@
  */
 
 import { escapeHtml } from "./formatting.js";
+import type { ModelInfo } from "../../core/models.js";
+import { getModels, resolveModel, resolveModelId } from "../../core/models.js";
 const DEFAULT_PULSE_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_METRICS_MESSAGE_MAX = 3800;
+
+type MetricsSnapshot = {
+  counters: Record<string, number>;
+  histograms: Record<
+    string,
+    { count: number; p50: number; p95: number; p99: number; avg: number }
+  >;
+};
 
 /** Parse a duration string like "30m", "2h", "1h30m" into milliseconds. */
 export function parseInterval(input: string): number | null {
@@ -16,7 +27,9 @@ export function parseInterval(input: string): number | null {
 }
 
 export function formatDuration(ms: number): string {
-  const s = Math.floor(ms / 1000);
+  const safeMs = Math.max(0, Math.round(ms));
+  if (safeMs < 1000) return `${safeMs}ms`;
+  const s = Math.floor(safeMs / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ${s % 60}s`;
@@ -37,6 +50,139 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
+/** Resolve a model ID to its backend-registered display name. */
+export function formatModelLabel(modelId: string): string {
+  return resolveModel(modelId)?.displayName ?? modelId;
+}
+
+/** Display name for a known ModelInfo. */
+export function formatModelOptionLabel(model: ModelInfo): string {
+  return model.displayName;
+}
+
+/** Compact display name for a known ModelInfo. */
+export function formatCompactModelLabel(model: ModelInfo): string {
+  return model.displayName;
+}
+
+export function getTelegramModelOptions(): ModelInfo[] {
+  const options: ModelInfo[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const model of getModels()) {
+    const key = model.displayName.toLowerCase();
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    options.push(model);
+  }
+
+  return options;
+}
+
+function truncateMetricLabel(label: string, max = 80): string {
+  return label.length <= max ? label : `${label.slice(0, max - 3)}...`;
+}
+
+export function renderMetricsMessages(
+  metrics: MetricsSnapshot,
+  maxLen = DEFAULT_METRICS_MESSAGE_MAX,
+): string[] {
+  const firstHeader = "<b>📊 Metrics</b>";
+  const continuationHeader = "<b>📊 Metrics (cont.)</b>";
+  const sections: string[][] = [];
+
+  const histKeys = Object.keys(metrics.histograms).sort();
+  if (histKeys.length > 0) {
+    sections.push([
+      "<b>Latency</b>",
+      ...histKeys.map((key) => {
+        const h = metrics.histograms[key];
+        return (
+          `  <code>${escapeHtml(truncateMetricLabel(key))}</code>  n=${h.count} ` +
+          `p50=${formatDuration(h.p50)}  p95=${formatDuration(h.p95)} ` +
+          `p99=${formatDuration(h.p99)}  avg=${formatDuration(h.avg)}`
+        );
+      }),
+    ]);
+  }
+
+  const counterKeys = Object.keys(metrics.counters).sort();
+  if (counterKeys.length > 0) {
+    const groups = new Map<string, string[]>();
+    for (const key of counterKeys) {
+      const prefix = key.includes(".") ? key.split(".")[0]! : "general";
+      if (!groups.has(prefix)) groups.set(prefix, []);
+      groups.get(prefix)!.push(key);
+    }
+
+    for (const prefix of [...groups.keys()].sort()) {
+      const keys = groups.get(prefix)!;
+      sections.push([
+        `<b>${escapeHtml(prefix)}</b>`,
+        ...keys.map((key) => {
+          const label = key.includes(".")
+            ? key.split(".").slice(1).join(".")
+            : key;
+          return (
+            `  <code>${escapeHtml(truncateMetricLabel(label))}</code>  ` +
+            `${metrics.counters[key]!.toLocaleString()}`
+          );
+        }),
+      ]);
+    }
+  }
+
+  if (sections.length === 0) {
+    return [`${firstHeader}\n\n<i>No metrics recorded yet.</i>`];
+  }
+
+  const chunks: string[] = [];
+  let header = firstHeader;
+  let current = header;
+
+  const flush = () => {
+    chunks.push(current);
+    header = continuationHeader;
+    current = header;
+  };
+
+  const appendLine = (line: string) => {
+    if (!line && current === header) return;
+
+    const candidate = `${current}\n${line}`;
+    if (candidate.length <= maxLen) {
+      current = candidate;
+      return;
+    }
+
+    if (current !== header) {
+      flush();
+      if (!line) return;
+    }
+
+    const available = maxLen - header.length - 1;
+    if (available < 0) return; // header alone already fills maxLen — skip line
+    const safeLine =
+      line.length <= available
+        ? line
+        : available >= 4
+          ? `${line.slice(0, available - 3)}...`
+          : line.slice(0, available); // not enough room for ellipsis — just truncate
+    current = `${current}\n${safeLine}`;
+  };
+
+  for (const section of sections) {
+    appendLine("");
+    for (const line of section) appendLine(line);
+  }
+
+  if (current !== header || chunks.length === 0) {
+    chunks.push(current);
+  }
+
+  return chunks;
+}
+
 export function renderSettingsText(
   model: string,
   effort: string,
@@ -50,14 +196,28 @@ export function renderSettingsText(
   return [
     "<b>\uD83E\uDD85 Settings</b>",
     "",
-    `<b>Model:</b> <code>${escapeHtml(model)}</code>`,
+    `<b>Model:</b> <code>${escapeHtml(formatModelLabel(model))}</code>`,
     ...(modelDetails?.length ? modelDetails : []),
     `<b>Effort:</b> ${effort}`,
     `<b>Pulse:</b> ${proactive ? "on" : "off"} (every ${intervalStr})`,
   ].join("\n");
 }
 
-type SettingsButton = { text: string; callback_data: string };
+export function isSelectedModel(
+  currentModel: string,
+  modelId: string,
+): boolean {
+  const current = resolveModel(currentModel);
+  const candidate = resolveModel(modelId);
+  if (current && candidate) {
+    return (
+      current.displayName.toLowerCase() === candidate.displayName.toLowerCase()
+    );
+  }
+  return resolveModelId(currentModel) === modelId;
+}
+
+export type SettingsButton = { text: string; callback_data: string };
 
 export function renderSettingsKeyboard(
   model: string,
@@ -65,35 +225,24 @@ export function renderSettingsKeyboard(
   proactive: boolean,
   modelButtons?: Array<SettingsButton>,
 ): Array<Array<SettingsButton>> {
-  const isModel = (id: string) => model.includes(id);
-  const defaultModelButtons: Array<SettingsButton> = [
-    {
-      text: isModel("sonnet") ? "✓ Sonnet" : "Sonnet",
-      callback_data: "settings:model:sonnet",
-    },
-    {
-      text: isModel("opus") ? "✓ Opus" : "Opus",
-      callback_data: "settings:model:opus",
-    },
-    {
-      text: isModel("haiku") ? "✓ Haiku" : "Haiku",
-      callback_data: "settings:model:haiku",
-    },
-  ];
-
-  const selectedModelButtons = (
-    modelButtons?.length ? modelButtons : defaultModelButtons
-  ).map((button) => ({ ...button }));
+  const selectedButtons = modelButtons?.length
+    ? modelButtons
+    : getTelegramModelOptions().map((m) => ({
+        text: isSelectedModel(model, m.id)
+          ? `\u2713 ${formatCompactModelLabel(m)}`
+          : formatCompactModelLabel(m),
+        callback_data: `settings:model:${m.id}`,
+      }));
+  const cols = modelButtons?.length ? 2 : 3;
   const modelRows: Array<Array<SettingsButton>> = [];
-  for (let index = 0; index < selectedModelButtons.length; index += 2) {
-    modelRows.push(selectedModelButtons.slice(index, index + 2));
+  for (let i = 0; i < selectedButtons.length; i += cols) {
+    modelRows.push(selectedButtons.slice(i, i + cols));
   }
-
   return [
     ...modelRows,
     [
       {
-        text: effort === "low" ? "✓ Low" : "Low",
+        text: effort === "low" ? "\u2713 Low" : "Low",
         callback_data: "settings:effort:low",
       },
       {

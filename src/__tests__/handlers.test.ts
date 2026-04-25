@@ -5,10 +5,6 @@ const executeMock = vi.hoisted(() => vi.fn());
 vi.mock("../core/dispatcher.js", () => ({
   execute: executeMock,
 }));
-vi.mock("../core/prompt-builder.js", () => ({
-  enrichDMPrompt: vi.fn((p: string) => p),
-  enrichGroupPrompt: vi.fn((p: string) => p),
-}));
 vi.mock("../storage/daily-log.js", () => ({
   appendDailyLog: vi.fn(),
   appendDailyLogResponse: vi.fn(),
@@ -1917,6 +1913,61 @@ describe("sendHtml — falls back to plain text on HTML send failure", () => {
     // Restore sendMessage mock for other tests
     mockBot.api.sendMessage = vi.fn(async () => ({ message_id: 1 }));
   }, 3000);
+
+  it("fallback iterates to strip nested tag sequences", async () => {
+    executeMock.mockResolvedValue({
+      text: "",
+      durationMs: 10,
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      bridgeMessageCount: 0,
+    });
+
+    let callCount = 0;
+    mockBot.api.sendMessage = vi.fn(async () => {
+      callCount++;
+      if (callCount === 1) throw new Error("Bad Request: can't parse entities");
+      return { message_id: callCount };
+    });
+
+    const { classify, friendlyMessage } = await import("../core/errors.js");
+    executeMock.mockRejectedValueOnce(new Error("some error"));
+    (classify as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+      reason: "error",
+      message: "some error",
+      retryable: false,
+    });
+    // A single-pass regex leaves a `<script>` survivor after one removal
+    // of the inner placeholder — the iterative loop must keep going.
+    (friendlyMessage as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      "<scr<script>ipt>alert(1)</script> tail",
+    );
+
+    const ctx = {
+      chat: { id: 97002, type: "private" },
+      message: {
+        text: "nested tag fallback",
+        message_id: 961,
+        reply_to_message: null,
+      },
+      me: { id: 999, username: "testbot" },
+      from: { id: 95, first_name: "Zoe" },
+    } as any;
+
+    await handleTextMessage(ctx, mockBot, mockConfig);
+    await new Promise((r) => setTimeout(r, 700));
+
+    expect(mockBot.api.sendMessage).toHaveBeenCalledTimes(2);
+    const plain = (mockBot.api.sendMessage as ReturnType<typeof vi.fn>).mock
+      .calls[1][1];
+    expect(plain).not.toMatch(/<[^<>]*>/); // no complete tag remains
+    expect(plain).not.toContain("<");
+    expect(plain).toContain("alert(1)");
+
+    mockBot.api.sendMessage = vi.fn(async () => ({ message_id: 1 }));
+  }, 3000);
 });
 
 describe("createStreamCallbacks — onStreamDelta streaming path", () => {
@@ -2586,11 +2637,8 @@ describe("handleStickerMessage — video sticker branch (L835 TRUE)", () => {
   }, 3000);
 });
 
-describe("processAndReply — group message without senderId (L552 FALSE branch)", () => {
-  it("skips enrichGroupPrompt when senderId is undefined in group", async () => {
-    const { enrichGroupPrompt } = await import("../core/prompt-builder.js");
-    (enrichGroupPrompt as ReturnType<typeof vi.fn>).mockClear();
-
+describe("processAndReply — group message without senderId", () => {
+  it("processes anonymous group messages without mutating the prompt", async () => {
     executeMock.mockResolvedValueOnce({
       text: "",
       durationMs: 10,
@@ -2617,13 +2665,14 @@ describe("processAndReply — group message without senderId (L552 FALSE branch)
     await handleTextMessage(ctx, mockBot, mockConfig);
     await new Promise((r) => setTimeout(r, 700));
 
-    // enrichGroupPrompt should NOT have been called (senderId falsy)
-    expect(enrichGroupPrompt).not.toHaveBeenCalled();
-    // But message was still processed
+    // Message was still processed, and the prompt is passed through verbatim.
     const calls = executeMock.mock.calls
       .slice(before)
       .filter((c) => (c[0] as { chatId: string }).chatId === String(chatId));
     expect(calls.length).toBe(1);
+    expect((calls[0][0] as { prompt: string }).prompt).toBe(
+      "@testbot anonymous message",
+    );
   }, 3000);
 });
 

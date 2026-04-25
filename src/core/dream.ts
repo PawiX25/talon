@@ -20,6 +20,8 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { files as pathFiles, dirs } from "../util/paths.js";
 import { log, logError, logWarn } from "../util/log.js";
 import { getPluginMcpServers } from "./plugin.js";
+import { DISALLOWED_TOOLS_BACKGROUND } from "./constants.js";
+import { getDefaultModel } from "./models.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -52,7 +54,7 @@ let configRef: {
 
 export function initDream(cfg: {
   model?: string;
-  /** Override model used specifically for dream consolidation (e.g. haiku for cost savings). Falls back to main model. */
+  /** Override model for dream consolidation (e.g. a cheaper model). Falls back to main model. */
   dreamModel?: string;
   claudeBinary?: string;
   workspace?: string;
@@ -147,7 +149,7 @@ async function runDreamAgent(lastRunTimestamp: number): Promise<string> {
 Run this command using the Bash tool:
 
 \`\`\`bash
-'${configRef.mempalace.pythonPath.replace(/'/g, "'\\''")}' -m mempalace mine '${dirs.dailyMemory.replace(/'/g, "'\\''")}' --palace '${configRef.mempalace.palacePath.replace(/'/g, "'\\''")}' --mode convos --wing daily-notes
+'${configRef.mempalace.pythonPath.replace(/'/g, "'\\''")}' -m mempalace mine '${dirs.dailyMemory.replace(/'/g, "'\\''")}' --palace '${configRef.mempalace.palacePath.replace(/'/g, "'\\''")}' --mode convos --wing daily-notes --agent talon
 \`\`\`
 
 Then write a personal diary entry. This is YOUR journal — not a status report. Reflect on:
@@ -178,7 +180,7 @@ If commands fail, log the error and continue — this stage is optional.`
     throw new Error(`Failed to read dream prompt from ${promptPath}`);
   }
 
-  const model = configRef.dreamModel ?? configRef.model ?? "claude-sonnet-4-6";
+  const model = configRef.dreamModel ?? configRef.model ?? getDefaultModel();
   const workspace = configRef.workspace ?? dirs.workspace;
 
   // Set up dream log file
@@ -208,22 +210,7 @@ If commands fail, log the error and continue — this stage is optional.`
     mcpServers: configRef.mempalace
       ? getPluginMcpServers("", "dream", ["mempalace"])
       : {},
-    disallowedTools: [
-      "EnterPlanMode",
-      "ExitPlanMode",
-      "EnterWorktree",
-      "ExitWorktree",
-      "TodoWrite",
-      "TodoRead",
-      "TaskCreate",
-      "TaskUpdate",
-      "TaskGet",
-      "TaskList",
-      "TaskOutput",
-      "TaskStop",
-      "AskUserQuestion",
-      "Agent",
-    ],
+    disallowedTools: [...DISALLOWED_TOOLS_BACKGROUND],
   };
 
   const timeoutPromise = new Promise<never>((_, reject) =>
@@ -347,8 +334,10 @@ function logDreamMessage(logFile: string, msg: SDKMessage): void {
         // Skip stream_event and other noisy message types
         break;
     }
-  } catch {
-    // Don't let logging errors break the dream
+  } catch (err) {
+    process.stderr.write(
+      `[dream] Log write error: ${err instanceof Error ? err.message : err}\n`,
+    );
   }
 }
 

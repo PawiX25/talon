@@ -57,6 +57,11 @@ if (selectedFrontend === "terminal") {
   const { createTeamsFrontend } = await import("./frontend/teams/index.js");
   frontend = createTeamsFrontend(config, gateway);
   log("bot", "Frontend: Teams");
+} else if (selectedFrontend === "discord") {
+  const { createDiscordFrontend } =
+    await import("./frontend/discord/index.js");
+  frontend = createDiscordFrontend(config, gateway);
+  log("bot", "Frontend: Discord");
 } else {
   const { createTelegramFrontend } =
     await import("./frontend/telegram/index.js");
@@ -66,7 +71,8 @@ if (selectedFrontend === "terminal") {
 
 // ── Create backend + wire dispatcher ─────────────────────────────────────────
 
-await initBackendAndDispatcher(config, frontend);
+const { backend } = await initBackendAndDispatcher(config, frontend);
+gateway.backend = backend;
 
 // ── Graceful shutdown ────────────────────────────────────────────────────────
 

@@ -18,6 +18,8 @@ import { files as pathFiles, dirs } from "../util/paths.js";
 import { log, logError, logWarn } from "../util/log.js";
 import { toYMD } from "../util/time.js";
 import { getPluginMcpServers } from "./plugin.js";
+import { DISALLOWED_TOOLS_BACKGROUND } from "./constants.js";
+import { getDefaultModel } from "./models.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -57,7 +59,7 @@ let configRef: {
 
 export function initHeartbeat(cfg: {
   model?: string;
-  /** Override model used specifically for heartbeat (e.g. haiku for cost savings). Falls back to main model. */
+  /** Override model for heartbeat (e.g. a cheaper model). Falls back to main model. */
   heartbeatModel?: string;
   claudeBinary?: string;
   workspace?: string;
@@ -263,7 +265,7 @@ async function runHeartbeatAgent(
   }
 
   const model =
-    configRef.heartbeatModel ?? configRef.model ?? "claude-sonnet-4-6";
+    configRef.heartbeatModel ?? configRef.model ?? getDefaultModel();
 
   // Set up heartbeat log file
   const heartbeatLogFile = await createHeartbeatLogFile();
@@ -292,22 +294,7 @@ async function runHeartbeatAgent(
       : {}),
     // Load all registered plugin MCP servers (excludes frontend-specific tools like telegram)
     mcpServers: getPluginMcpServers("", "heartbeat"),
-    disallowedTools: [
-      "EnterPlanMode",
-      "ExitPlanMode",
-      "EnterWorktree",
-      "ExitWorktree",
-      "TodoWrite",
-      "TodoRead",
-      "TaskCreate",
-      "TaskUpdate",
-      "TaskGet",
-      "TaskList",
-      "TaskOutput",
-      "TaskStop",
-      "AskUserQuestion",
-      "Agent",
-    ],
+    disallowedTools: [...DISALLOWED_TOOLS_BACKGROUND],
   };
 
   // NOTE: The timeout races against the agent promise but cannot abort the
@@ -454,8 +441,10 @@ async function logHeartbeatMessage(
       default:
         break;
     }
-  } catch {
-    // Don't let logging errors break the heartbeat
+  } catch (err) {
+    process.stderr.write(
+      `[heartbeat] Log write error: ${err instanceof Error ? err.message : err}\n`,
+    );
   }
 }
 

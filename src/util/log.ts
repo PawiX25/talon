@@ -40,6 +40,7 @@ export type LogComponent =
   | "gateway"
   | "plugin"
   | "teams"
+  | "discord"
   | "config"
   | "access"
   | "github"
@@ -73,11 +74,6 @@ try {
   /* ignore */
 }
 
-// Detect if running as a bun compiled binary (pino-pretty can't be bundled).
-// import.meta.path is Bun-specific — undefined in Node.js/Vitest, so guard with ?.
-const isBunBinary =
-  (import.meta as { path?: string }).path?.startsWith("/$bunfs/") ?? false;
-
 // Suppress console output for terminal frontend (stdout belongs to the REPL)
 let quiet = process.env.TALON_QUIET === "1";
 if (!quiet) {
@@ -96,8 +92,8 @@ const logger = pino({
   level: "trace",
   transport: {
     targets: [
-      // Console output (disabled in quiet mode or compiled binary)
-      ...(!quiet && !isBunBinary
+      // Console output (disabled in quiet mode)
+      ...(!quiet
         ? [
             {
               target: "pino-pretty",

@@ -1,0 +1,501 @@
+/**
+ * Claude model discovery — queries the SDK for available models.
+ *
+ * Spawns a throwaway SDK subprocess, calls supportedModels(), and
+ * registers the results in the global model registry. This is the
+ * only source of truth for available Claude models — if the SDK
+ * fails to provide models, initialization is aborted.
+ */
+
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import {
+  registerModels,
+  clearModelsByProvider,
+  registerProviderPrefix,
+} from "../../core/models.js";
+import type { ModelInfo } from "../../core/models.js";
+import { log, logError } from "../../util/log.js";
+
+type SdkModelInfo = {
+  value: string;
+  displayName: string;
+  description: string;
+};
+
+type ParsedModelIdentity = {
+  family: string | null;
+  version: string | null;
+  claudeId: string | null;
+  isOneMillion: boolean;
+};
+
+type SdkModelRecord = SdkModelInfo & {
+  index: number;
+  identity: ParsedModelIdentity;
+  familyKey: string | null;
+  variantKey: string | null;
+};
+
+// ── Tier / fallback inference ───────────────────────────────────────────────
+
+const FAMILY_VERSION_PATTERN = /\b([A-Za-z][A-Za-z-]*)\s+(\d+(?:\.\d+)*)\b/;
+const FAMILY_ONLY_PATTERN = /^\s*([A-Za-z][A-Za-z-]*)\b/;
+
+function normalizeFamilyName(family: string): string {
+  return family.trim().toLowerCase().replace(/\s+/g, "-");
+}
+
+function toDisplayFamilyName(family: string): string {
+  return family
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+/**
+ * Synthesize a clean label like "Sonnet 4.6" from parsed identity. Base and
+ * 1M variants share a label because the variant-merge step hides the base
+ * behind the 1M one — what we surface is effectively the 1M model.
+ */
+function deriveDisplayName(
+  identity: ParsedModelIdentity,
+  fallback: string,
+): string {
+  if (!identity.family) return fallback;
+  const family = toDisplayFamilyName(identity.family);
+  const version = identity.version ? ` ${identity.version}` : "";
+  return `${family}${version}`;
+}
+
+function stripOneMillionSuffix(value: string): string {
+  return value.endsWith("[1m]") ? value.slice(0, -4) : value;
+}
+
+function toDashVersion(version: string): string {
+  return version.replace(/\./g, "-");
+}
+
+function parseFamilyAndVersionFromTexts(
+  texts: readonly string[],
+): Pick<ParsedModelIdentity, "family" | "version"> {
+  for (const text of texts) {
+    const match = text.match(FAMILY_VERSION_PATTERN);
+    if (!match) continue;
+    return {
+      family: normalizeFamilyName(match[1]),
+      version: match[2],
+    };
+  }
+
+  for (const text of texts) {
+    const match = text.match(FAMILY_ONLY_PATTERN);
+    if (!match) continue;
+    const family = normalizeFamilyName(match[1]);
+    if (family === "default") continue;
+    return { family, version: null };
+  }
+
+  return { family: null, version: null };
+}
+
+function parseClaudeId(
+  value: string,
+): Pick<ParsedModelIdentity, "family" | "version" | "claudeId"> {
+  const claudeId = stripOneMillionSuffix(value);
+  if (!claudeId.startsWith("claude-")) {
+    return { family: null, version: null, claudeId: null };
+  }
+
+  const tokens = claudeId.slice("claude-".length).split("-");
+  let boundary = tokens.length;
+  while (boundary > 0 && /^\d+$/.test(tokens[boundary - 1] ?? "")) {
+    boundary -= 1;
+  }
+
+  const familyTokens = tokens.slice(0, boundary);
+  const versionTokens = tokens.slice(boundary);
+
+  return {
+    family:
+      familyTokens.length > 0
+        ? normalizeFamilyName(familyTokens.join("-"))
+        : null,
+    version: versionTokens.length > 0 ? versionTokens.join(".") : null,
+    claudeId,
+  };
+}
+
+function describeSdkModel(model: SdkModelInfo): ParsedModelIdentity {
+  const textIdentity = parseFamilyAndVersionFromTexts([
+    model.description,
+    model.displayName,
+    model.value,
+  ]);
+  const claudeIdentity = parseClaudeId(model.value);
+  const family = textIdentity.family ?? claudeIdentity.family;
+  const version = textIdentity.version ?? claudeIdentity.version;
+
+  return {
+    family,
+    version,
+    claudeId:
+      claudeIdentity.claudeId ??
+      (family && version ? `claude-${family}-${toDashVersion(version)}` : null),
+    isOneMillion: model.value.endsWith("[1m]"),
+  };
+}
+
+function buildFamilyKey(identity: ParsedModelIdentity): string | null {
+  return identity.family
+    ? `${identity.family}:${identity.version ?? "*"}`
+    : null;
+}
+
+/**
+ * Variant key collapses base and 1M variants of the same family+version into
+ * a single bucket. The priority function picks the 1M entry as canonical, so
+ * users see one "Sonnet 4.6" option (backed by sonnet[1m]) rather than two.
+ */
+function buildVariantKey(identity: ParsedModelIdentity): string | null {
+  return buildFamilyKey(identity);
+}
+
+function appendOneMillionSuffix(alias: string, isOneMillion: boolean): string {
+  return isOneMillion ? `${alias}[1m]` : alias;
+}
+
+function buildGeneratedAliases(identity: ParsedModelIdentity): string[] {
+  if (!identity.family) return [];
+
+  const aliases = [
+    appendOneMillionSuffix(identity.family, identity.isOneMillion),
+  ];
+
+  if (identity.version) {
+    aliases.push(
+      appendOneMillionSuffix(
+        `${identity.family}-${identity.version}`,
+        identity.isOneMillion,
+      ),
+      appendOneMillionSuffix(
+        `${identity.family}-${toDashVersion(identity.version)}`,
+        identity.isOneMillion,
+      ),
+    );
+  }
+
+  if (identity.claudeId) {
+    aliases.push(
+      appendOneMillionSuffix(identity.claudeId, identity.isOneMillion),
+    );
+  }
+
+  return aliases;
+}
+
+/**
+ * Lower number = higher priority when picking a canonical ID among variants
+ * sharing a family+version:
+ *   0 — "default"                      (SDK-recommended canonical)
+ *   1 — 1M variant, non-claude-prefix  (e.g. sonnet[1m])
+ *   2 — base variant, non-claude       (e.g. sonnet)
+ *   3 — claude-prefixed (legacy)       (e.g. claude-sonnet-4-6[1m])
+ */
+function getPreferredModelPriority(record: SdkModelRecord): number {
+  if (record.value === "default") return 0;
+  const isClaudePrefixed = record.value.startsWith("claude-");
+  if (record.identity.isOneMillion && !isClaudePrefixed) return 1;
+  if (!isClaudePrefixed) return 2;
+  return 3;
+}
+
+function buildSdkModelRecords(sdkModels: SdkModelInfo[]): SdkModelRecord[] {
+  return sdkModels.map((model, index) => {
+    const identity = describeSdkModel(model);
+    return {
+      ...model,
+      index,
+      identity,
+      familyKey: buildFamilyKey(identity),
+      variantKey: buildVariantKey(identity),
+    };
+  });
+}
+
+function buildPreferredCanonicalIds(
+  records: readonly SdkModelRecord[],
+): Map<string, string> {
+  const grouped = new Map<string, SdkModelRecord[]>();
+
+  for (const record of records) {
+    if (!record.variantKey) continue;
+    const variants = grouped.get(record.variantKey) ?? [];
+    variants.push(record);
+    grouped.set(record.variantKey, variants);
+  }
+
+  const preferred = new Map<string, string>();
+  for (const [variantKey, variants] of grouped) {
+    const canonical = [...variants].sort((left, right) => {
+      const priorityDelta =
+        getPreferredModelPriority(left) - getPreferredModelPriority(right);
+      if (priorityDelta !== 0) return priorityDelta;
+      return left.index - right.index;
+    })[0];
+    if (canonical) preferred.set(variantKey, canonical.value);
+  }
+
+  return preferred;
+}
+
+function mergeAliases(...lists: readonly string[][]): string[] {
+  const seen = new Set<string>();
+  const aliases: string[] = [];
+
+  for (const list of lists) {
+    for (const alias of list) {
+      const key = alias.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      aliases.push(alias);
+    }
+  }
+
+  return aliases;
+}
+
+function buildHiddenModelAliases(
+  records: readonly SdkModelRecord[],
+  preferredCanonicalIds: ReadonlyMap<string, string>,
+): Map<string, string[]> {
+  const hiddenAliases = new Map<string, string[]>();
+
+  for (const record of records) {
+    if (!record.variantKey) continue;
+    const preferredId = preferredCanonicalIds.get(record.variantKey);
+    if (!preferredId || preferredId === record.value) continue;
+
+    hiddenAliases.set(
+      preferredId,
+      mergeAliases(
+        hiddenAliases.get(preferredId) ?? [],
+        [record.value],
+        buildGeneratedAliases(record.identity),
+      ),
+    );
+  }
+
+  return hiddenAliases;
+}
+
+// ── SDK → registry conversion ───────────────────────────────────────────────
+
+/**
+ * Convert SDK ModelInfo to our registry format.
+ * Keeps SDK model IDs/display names intact while deriving compatibility aliases
+ * and duplicate collapsing from the SDK metadata instead of hardcoded versions.
+ */
+function convertSdkModels(sdkModels: SdkModelInfo[]): ModelInfo[] {
+  const records = buildSdkModelRecords(sdkModels);
+  const preferredCanonicalIds = buildPreferredCanonicalIds(records);
+  const hiddenModelAliases = buildHiddenModelAliases(
+    records,
+    preferredCanonicalIds,
+  );
+  const hiddenModels = new Set(
+    records
+      .filter(
+        (record) =>
+          !!record.variantKey &&
+          preferredCanonicalIds.get(record.variantKey) !== undefined &&
+          preferredCanonicalIds.get(record.variantKey) !== record.value,
+      )
+      .map((record) => record.value),
+  );
+
+  const usedKeys = new Set<string>();
+  const models: ModelInfo[] = [];
+
+  for (const record of records) {
+    if (hiddenModels.has(record.value)) continue;
+
+    const canonicalKey = record.value.toLowerCase();
+    if (usedKeys.has(canonicalKey)) continue;
+
+    const aliases = mergeAliases(
+      buildGeneratedAliases(record.identity),
+      hiddenModelAliases.get(record.value) ?? [],
+    )
+      .filter((alias) => alias.toLowerCase() !== canonicalKey)
+      .filter((alias) => !usedKeys.has(alias.toLowerCase()));
+
+    usedKeys.add(canonicalKey);
+    for (const alias of aliases) {
+      usedKeys.add(alias.toLowerCase());
+    }
+
+    models.push({
+      id: record.value,
+      displayName: deriveDisplayName(record.identity, record.displayName),
+      description: record.description,
+      aliases,
+      provider: "anthropic",
+    });
+  }
+
+  // Assign fallback chain from SDK order (single pass, O(1) lookups):
+  // - 1M variants fall back to their base family model
+  // - Base models fall back to the next base model in SDK order
+  const recordById = new Map(records.map((r) => [r.value, r]));
+  const baseByFamily = new Map<string, string>();
+  const baseModels: ModelInfo[] = [];
+
+  for (const model of models) {
+    if (model.id.endsWith("[1m]")) continue;
+    const rec = recordById.get(model.id);
+    if (rec?.familyKey) baseByFamily.set(rec.familyKey, model.id);
+    baseModels.push(model);
+  }
+
+  const baseIndex = new Map(baseModels.map((m, i) => [m.id, i]));
+
+  for (const model of models) {
+    const rec = recordById.get(model.id);
+    if (model.id.endsWith("[1m]") && rec?.familyKey) {
+      model.fallback = baseByFamily.get(rec.familyKey);
+    } else {
+      const idx = baseIndex.get(model.id);
+      if (idx !== undefined && idx < baseModels.length - 1) {
+        model.fallback = baseModels[idx + 1]!.id;
+      }
+    }
+  }
+
+  return models;
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
+/**
+ * Discover available models from the Claude Agent SDK and register them.
+ *
+ * Spawns a throwaway SDK subprocess, calls supportedModels(), converts the
+ * results to our registry format, and registers them. Throws on failure —
+ * if the SDK can't provide models, Talon cannot function.
+ */
+export async function registerClaudeModels(sdkOptions: {
+  model: string;
+  cwd?: string;
+  permissionMode?: string;
+  allowDangerouslySkipPermissions?: boolean;
+  pathToClaudeCodeExecutable?: string;
+}): Promise<void> {
+  const abort = new AbortController();
+  let drainPromise: Promise<void> | undefined;
+
+  try {
+    const neverYield = async function* (): AsyncGenerator<never> {
+      await new Promise<never>((_, reject) => {
+        abort.signal.addEventListener("abort", () =>
+          reject(new Error("aborted")),
+        );
+      });
+    };
+
+    const q = query({
+      prompt: neverYield(),
+      options: {
+        ...sdkOptions,
+        abortController: abort,
+      } as Parameters<typeof query>[0]["options"],
+    });
+
+    drainPromise = (async () => {
+      try {
+        for await (const _ of q) {
+          /* discard */
+        }
+      } catch {
+        /* expected on abort */
+      }
+    })();
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error("model discovery timed out after 15s")),
+        15_000,
+      );
+    });
+
+    let sdkModels: SdkModelInfo[];
+    try {
+      sdkModels = await Promise.race([q.supportedModels(), timeout]);
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+    }
+
+    if (sdkModels.length === 0) {
+      throw new Error("SDK returned empty model list");
+    }
+
+    const models = convertSdkModels(sdkModels);
+    clearModelsByProvider("anthropic");
+    registerProviderPrefix("claude-");
+    registerModels(models);
+    log(
+      "agent",
+      `Discovered ${models.length} models from SDK: ${models.map((m) => m.id).join(", ")}`,
+    );
+
+    abort.abort();
+    await drainPromise;
+  } catch (err) {
+    abort.abort();
+    if (drainPromise) await drainPromise.catch(() => {});
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("agent", `Fatal: model discovery failed — ${msg}`);
+    throw new Error(
+      `Claude SDK model discovery failed: ${msg}. ` +
+        `Check that Claude Code is installed and your API key is valid.`,
+    );
+  }
+}
+
+/**
+ * Register models from a static list. For use in tests and the CLI setup
+ * wizard where the SDK subprocess is not available.
+ */
+export function registerClaudeModelsStatic(models: ModelInfo[]): void {
+  registerProviderPrefix("claude-");
+  registerModels(models);
+}
+
+/** Default model definitions for CLI setup wizard and tests. */
+export const CLAUDE_MODELS_STATIC: ModelInfo[] = convertSdkModels([
+  {
+    value: "default",
+    displayName: "Default (recommended)",
+    description: "Sonnet 4.6 · Best for everyday tasks",
+  },
+  {
+    value: "sonnet[1m]",
+    displayName: "Sonnet (1M context)",
+    description: "Sonnet 4.6 with 1M context · Large context window",
+  },
+  {
+    value: "opus",
+    displayName: "Opus",
+    description: "Opus 4.6 · Most capable for complex work",
+  },
+  {
+    value: "opus[1m]",
+    displayName: "Opus (1M context)",
+    description: "Opus 4.6 with 1M context · Large context window",
+  },
+  {
+    value: "haiku",
+    displayName: "Haiku",
+    description: "Haiku 4.5 · Fastest for quick answers",
+  },
+]);

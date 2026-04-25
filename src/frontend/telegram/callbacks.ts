@@ -4,8 +4,6 @@
 
 import type { Bot } from "grammy";
 import type { TalonConfig } from "../../util/config.js";
-import { getOpenCodeModelSelectionValue } from "../../backend/opencode/index.js";
-
 import {
   getChatSettings,
   setChatModel,
@@ -22,14 +20,17 @@ import {
 } from "../../core/pulse.js";
 import { handleCallbackQuery } from "./handlers.js";
 import { escapeHtml } from "./formatting.js";
-import { renderSettingsText, renderSettingsKeyboard } from "./helpers.js";
 import {
-  getOpenCodeSettingsPresentation,
-  resolveOpenCodeModelSelection,
-  type TelegramInlineButton,
-} from "./opencode-ui.js";
+  renderSettingsText,
+  renderSettingsKeyboard,
+  type SettingsButton,
+} from "./helpers.js";
 
-export function registerCallbacks(bot: Bot, config: TalonConfig): void {
+export function registerCallbacks(
+  bot: Bot,
+  config: TalonConfig,
+  gateway?: { backend: import("../../core/types.js").QueryBackend | null },
+): void {
   // ── Callback query handler ──────────────────────────────────────────────────
 
   bot.on("callback_query:data", async (ctx) => {
@@ -57,40 +58,29 @@ export function registerCallbacks(bot: Bot, config: TalonConfig): void {
       }
 
       if (category === "model") {
-        if (config.backend === "opencode") {
-          if (value === "reset") {
-            setChatModel(cid, undefined);
-          } else {
-            const { catalog, resolution } =
-              await resolveOpenCodeModelSelection(value);
-            if (resolution.kind !== "exact") {
-              await ctx.answerCallbackQuery({ text: "Model is unavailable" });
-              return;
-            }
-            if (!resolution.model.selectable) {
-              const detail = resolution.model.loginRequired
-                ? `${resolution.model.providerName}: login required`
-                : resolution.model.envRequired
-                  ? `${resolution.model.providerName}: credentials required`
-                  : `${resolution.model.providerName}: unavailable`;
-              await ctx.answerCallbackQuery({ text: detail });
-              return;
-            }
-            setChatModel(
-              cid,
-              getOpenCodeModelSelectionValue(resolution.model, catalog),
-            );
+        if (value === "reset") {
+          setChatModel(cid, undefined);
+        } else if (gateway?.backend?.resolveModel) {
+          const resolution = await gateway.backend.resolveModel(value);
+          if (resolution.kind !== "exact") {
+            await ctx.answerCallbackQuery({ text: "Model is unavailable" });
+            return;
           }
+          if (!resolution.model.selectable) {
+            await ctx.answerCallbackQuery({
+              text: resolution.model.unavailableReason ?? "Unavailable",
+            });
+            return;
+          }
+          setChatModel(cid, resolution.storedValue);
         } else {
-          if (value === "reset") {
-            setChatModel(cid, undefined);
-          } else {
-            const resolved = resolveModelName(value);
-            setChatModel(cid, resolved);
-          }
+          setChatModel(cid, resolveModelName(value));
         }
+        const settingsModel = getChatSettings(cid).model ?? config.model;
+        const settingsModelInfo =
+          await gateway?.backend?.getModelInfo?.(settingsModel);
         await ctx.answerCallbackQuery({
-          text: `Model: ${getChatSettings(cid).model ?? config.model}`,
+          text: `Model: ${settingsModelInfo?.displayName ?? settingsModel}`,
         });
       } else if (category === "effort") {
         if (value === "adaptive") {
@@ -116,10 +106,11 @@ export function registerCallbacks(bot: Bot, config: TalonConfig): void {
       const effortName = chatSets.effort ?? "adaptive";
       const pulseOn = isPulseEnabled(cid);
       let modelDetails: Array<string> | undefined;
-      let modelButtons: Array<TelegramInlineButton> | undefined;
+      let modelButtons: Array<SettingsButton> | undefined;
 
-      if (config.backend === "opencode") {
-        const presentation = await getOpenCodeSettingsPresentation(activeModel);
+      if (gateway?.backend?.getSettingsPresentation) {
+        const presentation =
+          await gateway.backend.getSettingsPresentation(activeModel);
         modelDetails = presentation.modelDetails;
         modelButtons = presentation.modelButtons;
       }
@@ -240,7 +231,7 @@ export function registerCallbacks(bot: Bot, config: TalonConfig): void {
       return;
     }
 
-    // Handle model callbacks
+    // Handle model callbacks (from /model quick-pick buttons)
     if (data.startsWith("model:")) {
       const model = data.slice(6);
       if (model === "reset") {
@@ -248,52 +239,47 @@ export function registerCallbacks(bot: Bot, config: TalonConfig): void {
         await ctx.answerCallbackQuery({
           text: `Model: ${config.model} (default)`,
         });
+      } else if (gateway?.backend?.resolveModel) {
+        const resolution = await gateway.backend.resolveModel(model);
+        if (resolution.kind === "exact" && resolution.model.selectable) {
+          setChatModel(cid, resolution.storedValue);
+          await ctx.answerCallbackQuery({
+            text: `Model: ${resolution.model.displayName}`,
+          });
+        } else {
+          await ctx.answerCallbackQuery({ text: "Model is unavailable" });
+          return;
+        }
       } else {
-        const resolved = resolveModelName(model);
-        setChatModel(cid, resolved);
+        setChatModel(cid, resolveModelName(model));
         await ctx.answerCallbackQuery({
-          text: `Model: ${resolved}`,
+          text: `Model: ${getChatSettings(cid).model ?? config.model}`,
         });
       }
+      // Refresh the model picker buttons
       const current = getChatSettings(cid).model ?? config.model;
-      const isModel = (id: string) => current.includes(id);
-      try {
-        await ctx.editMessageText(
-          `<b>Model:</b> <code>${escapeHtml(current)}</code>`,
-          {
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    text: isModel("sonnet")
-                      ? "\u2713 Sonnet 4.6"
-                      : "Sonnet 4.6",
-                    callback_data: "model:sonnet",
-                  },
-                  {
-                    text: isModel("opus") ? "\u2713 Opus 4.6" : "Opus 4.6",
-                    callback_data: "model:opus",
-                  },
-                ],
-                [
-                  {
-                    text: isModel("haiku") ? "\u2713 Haiku 4.5" : "Haiku 4.5",
-                    callback_data: "model:haiku",
-                  },
-                  { text: "Reset to default", callback_data: "model:reset" },
-                ],
-              ],
-            },
-          },
-        );
-      } catch {
-        /* message unchanged */
+      const be = gateway?.backend;
+      if (be?.getSettingsPresentation) {
+        const pres = await be.getSettingsPresentation(current, "model:");
+        const modelInfo = await be.getModelInfo?.(current);
+        const displayName = modelInfo?.displayName ?? current;
+        const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+        for (let i = 0; i < pres.modelButtons.length; i += 2) {
+          rows.push(pres.modelButtons.slice(i, i + 2));
+        }
+        try {
+          await ctx.editMessageText(
+            `<b>Model:</b> <code>${escapeHtml(displayName)}</code>`,
+            { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } },
+          );
+        } catch {
+          /* message unchanged */
+        }
       }
       return;
     }
 
-    // Forward other callbacks to Claude
+    // Forward other callbacks to the AI backend
     handleCallbackQuery(ctx, bot, config);
   });
 }

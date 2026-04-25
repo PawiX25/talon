@@ -1,5 +1,70 @@
 # Changelog
 
+## [1.9.0](https://github.com/dylanneve1/talon/compare/v1.8.1...v1.9.0) (2026-04-21)
+
+
+### Features
+
+* **mempalace:** support 3.3.x multi-language entity detection ([#72](https://github.com/dylanneve1/talon/issues/72)) ([5da6e02](https://github.com/dylanneve1/talon/commit/5da6e02a500f8ce7fe2266160b4d5d5513f1aae5))
+
+
+### Bug Fixes
+
+* **robustness:** launcher-wrapped MCP spawns + minimal silence watchdog ([#73](https://github.com/dylanneve1/talon/issues/73)) ([37f41de](https://github.com/dylanneve1/talon/commit/37f41de4b5cd0707122eed5f055e5fa47a2b5bf8))
+
+## [1.8.1](https://github.com/dylanneve1/talon/compare/v1.8.0...v1.8.1) (2026-04-17)
+
+
+### Bug Fixes
+
+* **security:** address CodeQL HTML sanitization findings ([#63](https://github.com/dylanneve1/talon/issues/63)) ([39ac20b](https://github.com/dylanneve1/talon/commit/39ac20b6f7ce7e33a3cfac75d1ac6cb4db93d680))
+
+## [1.8.0](https://github.com/dylanneve1/talon/compare/v1.7.0...v1.8.0) (2026-04-16)
+
+
+### Features
+
+* move Claude model logic to backend and remove model tiers ([#54](https://github.com/dylanneve1/talon/issues/54)) ([99d6b73](https://github.com/dylanneve1/talon/commit/99d6b73ba3a44bb6e91008a110bc9c3ec72390fc))
+* **opencode:** add model catalog and fix delivery/status flows ([#57](https://github.com/dylanneve1/talon/issues/57)) ([bb9a216](https://github.com/dylanneve1/talon/commit/bb9a216721174e946876a5828a545926573d941e))
+
+## [1.7.0](https://github.com/dylanneve1/talon/compare/v1.6.1...v1.7.0) (2026-04-14)
+
+
+### Features
+
+* add standalone MCP server plugin support ([#52](https://github.com/dylanneve1/talon/issues/52)) ([bf3cdc3](https://github.com/dylanneve1/talon/commit/bf3cdc30d4d157f51433b70ef0968514dcb90c84))
+
+## [1.6.1](https://github.com/dylanneve1/talon/compare/v1.6.0...v1.6.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* model switch doubling context usage ([#44](https://github.com/dylanneve1/talon/issues/44)) ([032d8cc](https://github.com/dylanneve1/talon/commit/032d8cce53be3cd626559348862b2fdc1ffe86d9))
+
+## [1.6.0](https://github.com/dylanneve1/talon/compare/v1.5.0...v1.6.0) (2026-04-13)
+
+
+### Features
+
+* add model registry middleware and dynamic model pickers ([#42](https://github.com/dylanneve1/talon/issues/42)) ([6e68b6f](https://github.com/dylanneve1/talon/commit/6e68b6f957dd2c3c24c9a16ff1137aa2ff8962c4))
+
+## [1.5.0](https://github.com/dylanneve1/talon/compare/v1.4.0...v1.5.0) (2026-04-12)
+
+
+### Features
+
+* add reload_plugins tool for hot-reloading MCP plugins ([#37](https://github.com/dylanneve1/talon/issues/37)) ([ca72c4e](https://github.com/dylanneve1/talon/commit/ca72c4e50507589daf30ad9ade50700487f6586a))
+* give heartbeat access to all MCP plugins ([#33](https://github.com/dylanneve1/talon/issues/33)) ([d148b90](https://github.com/dylanneve1/talon/commit/d148b909021fafadb023b87f9b259bd214dbe7c9))
+* warm-start sessions on /reset for immediate /status context data ([6956e41](https://github.com/dylanneve1/talon/commit/6956e41599bede2242e6c91ed28b2b688dddfab6))
+
+
+### Bug Fixes
+
+* /status context bar — use SDK [1m] model suffix for correct context window ([ffa0b61](https://github.com/dylanneve1/talon/commit/ffa0b61fa44b7a0cb53d87a562fba894e5cdf27a))
+* await warmSession on /reset so context data is ready for /status ([3ef6c60](https://github.com/dylanneve1/talon/commit/3ef6c60d55e7f2562f58f10bf5a2582f28ab0300))
+* drain SDK stream during warm-up so control requests don't stall ([d46ef0d](https://github.com/dylanneve1/talon/commit/d46ef0d40fc8d9a14abfe179babb65577331306d))
+* regenerate lockfile with npm 10 for CI Node 22 compat ([0ff5eb7](https://github.com/dylanneve1/talon/commit/0ff5eb783c9499145db4f47af68eb436adfb0534))
+
 ## [1.4.0](https://github.com/dylanneve1/talon/compare/v1.3.0...v1.4.0) (2026-04-10)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "talon-agent",
-  "version": "1.4.0",
+  "version": "1.9.0",
   "description": "Multi-frontend AI agent with full tool access, streaming, cron jobs, and plugin system",
   "author": "Dylan Neve",
   "license": "MIT",
@@ -36,7 +36,6 @@
     "tsconfig.json"
   ],
   "scripts": {
-    "build:binary": "bun build --compile --minify src/index.ts --outfile talon-bun",
     "start": "tsx src/index.ts",
     "cli": "tsx src/cli.ts",
     "setup": "tsx src/cli.ts setup",
@@ -51,7 +50,7 @@
     "format:check": "prettier --check src/ prompts/"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.97",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.108",
     "@brave/brave-search-mcp-server": "^2.0.75",
     "@clack/prompts": "^1.2.0",
     "@grammyjs/auto-retry": "^2.0.2",
@@ -62,6 +61,7 @@
     "big-integer": "^1.6.52",
     "cheerio": "^1.2.0",
     "croner": "^10.0.1",
+    "discord.js": "^14.26.3",
     "grammy": "^1.42.0",
     "marked": "^18.0.0",
     "p-retry": "^8.0.0",

@@ -31,11 +31,13 @@ export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**
- * Convert Claude's Markdown output to Telegram-safe HTML.
+ * Convert Markdown output to Telegram-safe HTML.
  *
  * Handles: bold, italic, inline code, fenced code blocks, links.
  * Escapes HTML entities in non-formatted text.

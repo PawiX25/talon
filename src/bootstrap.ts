@@ -29,7 +29,7 @@ import type { QueryBackend, ContextManager } from "./core/types.js";
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type Frontend = {
-  name: "telegram" | "terminal" | "teams";
+  name: "telegram" | "terminal" | "teams" | "discord";
   context: ContextManager;
   sendTyping: (chatId: number) => Promise<void>;
   sendMessage: (chatId: number, text: string) => Promise<void>;
@@ -46,6 +46,10 @@ export type BootstrapOptions = {
 
 export type BootstrapResult = {
   config: TalonConfig;
+};
+
+export type BackendAndDispatcherResult = {
+  backend: QueryBackend;
 };
 
 // ── Bootstrap: config, env, plugins, workspace, storage ──────────────────────
@@ -66,7 +70,7 @@ export async function bootstrap(
     config.mempalace?.enabled === true ||
     config.playwright?.enabled === true;
   if (hasPlugins) {
-    const { loadPlugins, getPluginPromptAdditions, registerPlugin } =
+    const { loadPlugins, loadBuiltinPlugins, getPluginPromptAdditions } =
       await import("./core/plugin.js");
 
     // External plugins
@@ -77,108 +81,8 @@ export async function bootstrap(
       await loadPlugins(config.plugins, frontends);
     }
 
-    // Built-in: GitHub
-    if (config.github?.enabled) {
-      const { createGitHubPlugin } = await import("./plugins/github/index.js");
-      const { getPlugin } = await import("./core/plugin.js");
-      const githubConfig = config.github as unknown as Record<string, unknown>;
-      const gh = createGitHubPlugin({ token: config.github.token });
-      registerPlugin(gh, githubConfig);
-
-      if (getPlugin("github")) {
-        try {
-          const GITHUB_INIT_TIMEOUT_MS = 15_000;
-          await Promise.race([
-            gh.init?.(githubConfig),
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error("GitHub init timed out after 15s")),
-                GITHUB_INIT_TIMEOUT_MS,
-              ),
-            ),
-          ]);
-        } catch (err) {
-          log(
-            "github",
-            `Init warning: ${err instanceof Error ? err.message : err}`,
-          );
-        }
-      }
-    }
-
-    // Built-in: MemPalace
-    if (config.mempalace?.enabled) {
-      const { createMempalacePlugin } =
-        await import("./plugins/mempalace/index.js");
-      const { getPlugin } = await import("./core/plugin.js");
-      const { dirs, files: pathFiles } = await import("./util/paths.js");
-      const pythonPath =
-        config.mempalace.pythonPath ?? pathFiles.mempalacePython;
-      const palacePath = config.mempalace.palacePath ?? dirs.palace;
-      const mempalaceConfig = config.mempalace as unknown as Record<
-        string,
-        unknown
-      >;
-      const mp = createMempalacePlugin({ pythonPath, palacePath });
-      registerPlugin(mp, mempalaceConfig);
-
-      // Only call init if registration succeeded (validation passed)
-      if (getPlugin("mempalace")) {
-        try {
-          const MEMPALACE_INIT_TIMEOUT_MS = 30_000;
-          await Promise.race([
-            mp.init?.(mempalaceConfig),
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error("MemPalace init timed out after 30s")),
-                MEMPALACE_INIT_TIMEOUT_MS,
-              ),
-            ),
-          ]);
-        } catch (err) {
-          log(
-            "mempalace",
-            `Init warning: ${err instanceof Error ? err.message : err}`,
-          );
-        }
-      }
-    }
-
-    // Built-in: Playwright
-    if (config.playwright?.enabled) {
-      const { createPlaywrightPlugin } =
-        await import("./plugins/playwright/index.js");
-      const { getPlugin } = await import("./core/plugin.js");
-      const playwrightConfig = config.playwright as unknown as Record<
-        string,
-        unknown
-      >;
-      const pw = createPlaywrightPlugin({
-        browser: config.playwright.browser,
-        headless: config.playwright.headless,
-      });
-      registerPlugin(pw, playwrightConfig);
-
-      if (getPlugin("playwright")) {
-        try {
-          const PW_INIT_TIMEOUT_MS = 15_000;
-          await Promise.race([
-            pw.init?.(playwrightConfig),
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error("Playwright init timed out after 15s")),
-                PW_INIT_TIMEOUT_MS,
-              ),
-            ),
-          ]);
-        } catch (err) {
-          log(
-            "playwright",
-            `Init warning: ${err instanceof Error ? err.message : err}`,
-          );
-        }
-      }
-    }
+    // Built-in plugins (GitHub, MemPalace, Playwright) — shared with hot-reload
+    await loadBuiltinPlugins(config);
 
     rebuildSystemPrompt(config, getPluginPromptAdditions());
   }
@@ -203,20 +107,85 @@ export async function bootstrap(
 export async function initBackendAndDispatcher(
   config: TalonConfig,
   frontend: Frontend,
-): Promise<void> {
+): Promise<BackendAndDispatcherResult> {
   let backend: QueryBackend;
 
   if (config.backend === "opencode") {
     const { initOpenCodeAgent, handleMessage: opencodeHandleMessage } =
       await import("./backend/opencode/index.js");
+    const ocModelProvider =
+      await import("./backend/opencode/model-provider.js");
     initOpenCodeAgent(config, frontend.getBridgePort, frontend.name);
-    backend = { query: (params) => opencodeHandleMessage(params) };
+    backend = {
+      query: (params) => opencodeHandleMessage(params),
+      resolveModel: (q) => ocModelProvider.resolveModel(q),
+      getModelInfo: (id) => ocModelProvider.getModelInfo(id),
+      getSettingsPresentation: (m, prefix) =>
+        ocModelProvider.getSettingsPresentation(m, prefix),
+      getProviders: () => ocModelProvider.getProviders(),
+      getProviderModels: (p, pg, ps) =>
+        ocModelProvider.getProviderModels(p, pg, ps),
+      formatModelError: (q, r) => ocModelProvider.formatModelError(q, r),
+      listModels: (f) => ocModelProvider.listModels(f),
+      backendLabel: "OpenCode",
+      getSessionSnapshot: async (sessionId) => {
+        const { getOpenCodeSessionSnapshot } =
+          await import("./backend/opencode/index.js");
+        const snap = await getOpenCodeSessionSnapshot(sessionId);
+        if (!snap) return undefined;
+        return {
+          inputTokens: snap.usage?.totalInputTokens,
+          outputTokens: snap.usage?.totalOutputTokens,
+          cacheRead: snap.usage?.totalCacheRead,
+          cacheWrite: snap.usage?.totalCacheWrite,
+          contextModelId: snap.assistant?.modelID,
+        };
+      },
+    };
     log("bot", "Backend: OpenCode");
   } else {
-    const { initAgent: initClaudeAgent, handleMessage: claudeHandleMessage } =
-      await import("./backend/claude-sdk/index.js");
-    initClaudeAgent(config, frontend.getBridgePort);
-    backend = { query: (params) => claudeHandleMessage(params) };
+    const {
+      initAgent: initClaudeAgent,
+      handleMessage: claudeHandleMessage,
+      warmSession: claudeWarmSession,
+      updateSystemPrompt: claudeUpdateSystemPrompt,
+      getActiveQuery,
+      buildMcpServers,
+    } = await import("./backend/claude-sdk/index.js");
+    const { getPluginMcpServers } = await import("./core/plugin.js");
+    const claudeModelProvider =
+      await import("./backend/claude-sdk/model-provider.js");
+    await initClaudeAgent(config, frontend.getBridgePort);
+    backend = {
+      query: (params) => claudeHandleMessage(params),
+      warmSession: (chatId) => claudeWarmSession(chatId),
+      updateSystemPrompt: (prompt) => claudeUpdateSystemPrompt(prompt),
+      resolveModel: (q) => claudeModelProvider.resolveModel(q),
+      getModelInfo: (id) => claudeModelProvider.getModelInfo(id),
+      getSettingsPresentation: (m, prefix) =>
+        claudeModelProvider.getSettingsPresentation(m, prefix),
+      getProviders: () => claudeModelProvider.getProviders(),
+      getProviderModels: (p, pg, ps) =>
+        claudeModelProvider.getProviderModels(p, pg, ps),
+      formatModelError: (q, r) => claudeModelProvider.formatModelError(q, r),
+      listModels: (f) => claudeModelProvider.listModels(f),
+      backendLabel: "Anthropic",
+      refreshMcpServers: async (chatId) => {
+        const qi = getActiveQuery(chatId);
+        if (!qi) return null;
+        // Two-phase teardown: first remove all MCP servers so the SDK
+        // sends a close/shutdown to each subprocess via stdio (OS-agnostic),
+        // then install the fresh set. This ensures old processes receive an
+        // explicit termination message and exit before new ones spawn.
+        await qi.setMcpServers({});
+        const bridgeUrl = `http://127.0.0.1:${frontend.getBridgePort()}`;
+        const freshServers = {
+          ...buildMcpServers(chatId),
+          ...getPluginMcpServers(bridgeUrl, chatId),
+        };
+        return qi.setMcpServers(freshServers);
+      },
+    };
     log("bot", "Backend: Claude SDK");
   }
 
@@ -261,4 +230,6 @@ export async function initBackendAndDispatcher(
     claudeBinary: config.claudeBinary,
     workspace: config.workspace,
   });
+
+  return { backend };
 }

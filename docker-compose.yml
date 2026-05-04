@@ -3,11 +3,26 @@ services:
     build: .
     restart: unless-stopped
     volumes:
-      - ./workspace:/app/workspace
-      - ./prompts:/app/prompts
-      # Claude Code sessions (needed for session resume)
-      - ${HOME}/.claude:/root/.claude
+      # Talon's persistent home: config, sessions, workspace, palace, userbot session.
+      # Container's HOME=/home/node, so this must land at /home/node/.talon.
+      - ${HOME}/.talon:/home/node/.talon
+      # Claude Code credentials. The Agent SDK spawns claude as a subprocess and
+      # reads $HOME/.claude/.credentials.json — mount the host's auth at the
+      # container user's HOME, not /root, since we run as the node user.
+      #
+      # Two bootstrap paths, both work with this rw mount:
+      #  1. You already ran `claude auth login` on the host: existing
+      #     ~/.claude/.credentials.json is reused inside the container.
+      #  2. Fresh setup, no host install: `docker compose exec talon bash` then
+      #     `claude auth login` — paste the OAuth URL into your host browser,
+      #     paste the code back, and creds land in this mount.
+      # Don't add :ro here — path 2 needs writes to land the OAuth callback,
+      # and Claude Code rotates its session/projects state inside this dir.
+      - ${HOME}/.claude:/home/node/.claude
     environment:
       - NODE_ENV=production
+    # Optional: ANTHROPIC_API_KEY etc. as a fallback to OAuth-via-credentials.json.
+    # Uncomment and create .env if you want to auth via API key instead of Claude Max.
+    # env_file: .env
     mem_limit: 1g
     cpus: "1.0"

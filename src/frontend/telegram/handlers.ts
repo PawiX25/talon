@@ -781,16 +781,10 @@ async function processAndReply(params: ProcessAndReplyParams): Promise<void> {
       },
     });
 
-    if (
-      result.bridgeMessageCount === 0 &&
-      !stream.sentTextBlock &&
-      result.text?.trim()
-    ) {
-      log(
-        "bot",
-        `Suppressed fallback text (${result.text.length} chars) — no send tool used`,
-      );
-    }
+    // No fallback delivery — turns that don't call `end_turn` / `send` are
+    // intentional silent ends. Trailing prose written without a tool call is
+    // scratchpad and dropped (the SDK handler logs a `scratchpad.trailing_
+    // text_dropped` metric so missed end_turn calls show up in counters).
   } finally {
     clearTimeout(streamTimer);
   }

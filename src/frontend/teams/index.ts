@@ -14,7 +14,7 @@ import type { Gateway } from "../../core/gateway.js";
 import { log, logError } from "../../util/log.js";
 import { deriveNumericChatId } from "../../util/chat-id.js";
 import { resolveModel } from "../../core/models.js";
-import { createTeamsActionHandler } from "./actions.js";
+import { createTeamsActionHandler, postToTeams } from "./actions.js";
 import { splitTeamsMessage, buildAdaptiveCard } from "./formatting.js";
 import {
   initGraphClient,
@@ -356,18 +356,28 @@ export function createTeamsFrontend(
                   `  tool: ${toolName}${detail ? ` — ${String(detail).slice(0, 100)}` : ""}`,
                 );
               },
-            })
-              .then(async (result) => {
-                // Only deliver messages sent via the send_message tool.
-                // Do NOT send fallback text — if the model chose not to use send_message,
-                // it's either choosing not to respond or outputting internal reasoning
-                // that shouldn't be shown to users.
-                if (result.bridgeMessageCount === 0 && result.text?.trim()) {
-                  log(
+              // Deliver assistant text (progress text before tool calls AND
+              // the end-of-turn trailing-text fallback) to the Teams chat.
+              // Without this, prose-only assistant turns would be silently
+              // dropped — same scratchpad bug Telegram hit.
+              onTextBlock: async (blockText) => {
+                if (!blockText.trim()) return;
+                try {
+                  await postToTeams(webhookUrl, blockText);
+                  gateway.incrementMessages(numericChatId);
+                } catch (err) {
+                  logError(
                     "teams",
-                    `Suppressed fallback text (${result.text.length} chars) — no send_message tool used`,
+                    `onTextBlock postToTeams failed: ${err instanceof Error ? err.message : err}`,
                   );
                 }
+              },
+            })
+              .then(async (_result) => {
+                // No fallback delivery — turns without end_turn / send_message
+                // are intentional silent ends. Trailing prose without a tool
+                // call is scratchpad and dropped; the SDK handler emits a
+                // `scratchpad.trailing_text_dropped` metric on those.
               })
               .catch((err) => {
                 logError(

@@ -24,6 +24,7 @@ import { log, logError, logWarn } from "../../util/log.js";
 import { traceMessage } from "../../util/trace.js";
 import { incrementCounter, recordHistogram } from "../../util/metrics.js";
 import { formatFullDatetime } from "../../util/time.js";
+import { isTurnTerminator } from "../../core/tools/index.js";
 
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import type { QueryParams, QueryResult } from "../../core/types.js";
@@ -38,6 +39,8 @@ import {
   processStreamDelta,
   processAssistantMessage,
   processResultMessage,
+  normalizeForDedupe,
+  isDuplicateOfDelivered,
 } from "./stream.js";
 
 // ── Active query store ──────────────────────────────────────────────────────
@@ -92,6 +95,30 @@ export async function handleMessage(
   activeQueries.set(chatId, qi);
   const state = createStreamState();
 
+  // Capture text args from delivery tools (`end_turn`, `send(type="text")`)
+  // so the end-of-turn trailing-text fallback can dedupe against content
+  // already delivered. Without this, a model that writes prose AND calls a
+  // delivery tool with similar text would surface twice in the chat.
+  const captureDeliveredText = (
+    toolName: string,
+    input: Record<string, unknown>,
+  ): void => {
+    let deliveredText: string | undefined;
+    if (toolName === "end_turn" && typeof input.text === "string") {
+      deliveredText = input.text;
+    } else if (
+      toolName === "send" &&
+      input.type === "text" &&
+      typeof input.text === "string"
+    ) {
+      deliveredText = input.text;
+    }
+    if (deliveredText) {
+      const norm = normalizeForDedupe(deliveredText);
+      if (norm) state.deliveredTextNorms.push(norm);
+    }
+  };
+
   try {
     for await (const message of qi) {
       // Session ID capture
@@ -110,9 +137,18 @@ export async function handleMessage(
       if (isAssistant(message)) {
         const result = processAssistantMessage(message, state);
 
-        // Notify tool usage
+        // Track the trailing text from this assistant message. Multiple
+        // assistant messages can fire per turn (one per tool-use round-trip);
+        // only the LAST one's trailingText is the user-facing final reply.
+        state.lastTrailingText = result.trailingText;
+
+        // Notify tool usage + capture delivery-tool text for end-of-turn dedup
         for (const tool of result.tools) {
           incrementCounter(`tool_calls.${tool.name}`);
+          captureDeliveredText(tool.name, tool.input);
+          if (isTurnTerminator(tool.name)) {
+            state.turnTerminated = true;
+          }
           if (onToolUse) {
             try {
               onToolUse(tool.name, tool.input);
@@ -130,6 +166,26 @@ export async function handleMessage(
             } catch {
               /* non-fatal — don't abort the stream loop */
             }
+          }
+        }
+
+        // Turn-terminator tool was called (e.g. `end_turn`). Abort the SDK
+        // loop cleanly so the model can't keep producing trailing scratchpad
+        // after declaring "I'm done". Without this, the model is free to
+        // think more, call more tools, or write more prose — and any prose
+        // afterwards trips the flow-violation re-prompt path. Calling
+        // qi.interrupt() lets the SDK yield its terminal result and exit
+        // the for-await loop on the next iteration.
+        if (state.turnTerminated) {
+          try {
+            await qi.interrupt();
+          } catch (err) {
+            // Non-fatal: interrupt failures shouldn't break the turn,
+            // they just mean the natural end-of-stream path will run.
+            logWarn(
+              "agent",
+              `[${chatId}] qi.interrupt() after turn terminator failed: ${(err as Error)?.message ?? err}`,
+            );
           }
         }
         continue;
@@ -221,6 +277,55 @@ export async function handleMessage(
       const name =
         cleanText.length > 30 ? cleanText.slice(0, 30) + "..." : cleanText;
       setSessionName(chatId, name);
+    }
+  }
+
+  // ── Trailing-prose contract + flow-violation retry ──────────────────────
+  // The output stream is private scratchpad by design. Final replies must go
+  // through `end_turn` (canonical) or `send` (mid-turn rich content). When a
+  // turn ends with no tool call AND no trailing prose, that's valid silent
+  // close (model only reacted, or had nothing to do). When the model wrote
+  // prose but didn't route it through a delivery tool, that's a flow
+  // violation — the prose is private scratchpad, dropped from the user's
+  // view. To prevent these from going unnoticed, we re-prompt the model
+  // ONCE with a synthetic system message in the same session: it sees its
+  // broken turn in history + a reminder of the contract, and gets a fresh
+  // turn to deliver via end_turn. If it violates again on the retry, we
+  // give up loudly and accept the silent drop.
+  //
+  // Exception: if a turn-terminator tool (e.g. end_turn) was called, the
+  // model explicitly declared "I'm done" — respect it. Any trailing prose
+  // that slipped in earlier in the same assistant message gets logged but
+  // does NOT re-prompt (would loop endlessly with a model that pairs prose
+  // with end_turn).
+  const trailing = state.lastTrailingText.trim();
+  const flowViolation =
+    trailing.length > 0 &&
+    !state.turnTerminated &&
+    !isDuplicateOfDelivered(trailing, state.deliveredTextNorms);
+
+  if (flowViolation) {
+    incrementCounter("scratchpad.trailing_text_dropped");
+    log(
+      "agent",
+      `[${chatId}] flow violation: trailing prose (${trailing.length} chars) without end_turn/send. ${
+        _retried
+          ? "Already retried — accepting silent drop."
+          : "Re-prompting with reminder."
+      }`,
+    );
+
+    if (!_retried) {
+      incrementCounter("scratchpad.flow_violation_retried");
+      const reminder =
+        "[FLOW VIOLATION] You produced text content but didn't call `end_turn` or `send`. " +
+        "Pure prose in your output stream is private scratchpad — it's dropped, the user " +
+        "never sees it. Please retry with the proper flow: " +
+        "`end_turn(text=...)` to deliver a final reply, " +
+        "`end_turn()` (no args) to close silently, or " +
+        "`send(...)` for mid-turn rich content (photos, polls, etc.). " +
+        "Respond now using the correct tool call.";
+      return handleMessage({ ...params, text: reminder }, true);
     }
   }
 

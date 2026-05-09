@@ -14,9 +14,15 @@ import {
   normalizeForDedupe,
   isDuplicateOfDelivered,
   createStreamState,
+  processAssistantMessage,
 } from "../backend/claude-sdk/stream.js";
+import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { messagingTools } from "../core/tools/messaging.js";
-import { isTurnTerminator, ALL_TOOLS } from "../core/tools/index.js";
+import {
+  isTurnTerminator,
+  stripMcpPrefix,
+  ALL_TOOLS,
+} from "../core/tools/index.js";
 
 describe("normalizeForDedupe", () => {
   it("trims, lowercases, and collapses whitespace", () => {
@@ -120,6 +126,42 @@ describe("turn-terminator declaration", () => {
     expect(isTurnTerminator("nonexistent_tool")).toBe(false);
   });
 
+  it("isTurnTerminator handles MCP-prefixed names", () => {
+    // Tools served through MCP arrive with a `mcp__<server>__` prefix.
+    // The check must normalize the prefix so the SDK's actual tool names
+    // match the registry. Without this, downstream branches gated on
+    // `state.turnTerminated` silently never fire — the flow-violation
+    // re-prompt skip and trailing-prose dedup both break.
+    expect(isTurnTerminator("mcp__telegram-tools__end_turn")).toBe(true);
+    expect(isTurnTerminator("mcp__teams-tools__end_turn")).toBe(true);
+    // Non-terminators with the same prefix shape still return false
+    expect(isTurnTerminator("mcp__telegram-tools__send")).toBe(false);
+    expect(isTurnTerminator("mcp__telegram-tools__react")).toBe(false);
+    // Server name with hyphen + underscore must still match the boundary
+    expect(isTurnTerminator("mcp__some-server-name__end_turn")).toBe(true);
+  });
+
+  it("stripMcpPrefix strips the mcp__<server>__ prefix when present", () => {
+    expect(stripMcpPrefix("mcp__telegram-tools__end_turn")).toBe("end_turn");
+    expect(stripMcpPrefix("mcp__brave-search__brave_web_search")).toBe(
+      "brave_web_search",
+    );
+    // Non-greedy match takes the FIRST `__` after `mcp__` as the boundary
+    expect(stripMcpPrefix("mcp__a__b__c")).toBe("b__c");
+  });
+
+  it("stripMcpPrefix returns input unchanged when no prefix matches", () => {
+    expect(stripMcpPrefix("end_turn")).toBe("end_turn");
+    expect(stripMcpPrefix("send")).toBe("send");
+    expect(stripMcpPrefix("Read")).toBe("Read");
+    // Looks like a prefix but missing the trailing `__`
+    expect(stripMcpPrefix("mcp__incomplete")).toBe("mcp__incomplete");
+    // Different prefix shape
+    expect(stripMcpPrefix("not_mcp__server__tool")).toBe(
+      "not_mcp__server__tool",
+    );
+  });
+
   it("only one turn terminator currently exists (end_turn)", () => {
     // If a future change adds a second terminator, this test should fail
     // and the author should document why a new terminator is necessary.
@@ -185,5 +227,81 @@ describe("end_turn tool definition", () => {
     const result = await endTurn!.execute({ text: "   \n\t  " }, bridge);
     expect(bridge).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: true, silent: true });
+  });
+});
+
+// ── Production wire-shape contract ──────────────────────────────────────────
+//
+// These tests pin the integration between the SDK's actual emitted tool
+// names (always MCP-prefixed when served via MCP) and the registry checks
+// the handler runs against them. They are the tests that would have caught
+// the bug fixed in this PR — strict-equality `isTurnTerminator("end_turn")`
+// passed in unit tests but the production code path called
+// `isTurnTerminator("mcp__telegram-tools__end_turn")` and silently failed.
+//
+// Auto-derived from ALL_TOOLS so adding a new endsTurn tool or a new MCP
+// frontend stays covered without manually adding cases.
+
+describe("turn-terminator integration with SDK production tool name shapes", () => {
+  // Built-in MCP server names that the SDK is known to wire Talon's tools
+  // through. Keep this list in sync with the actual MCP server registration
+  // in src/core/tools/mcp-server.ts and frontend wiring.
+  const KNOWN_MCP_SERVERS = ["telegram-tools", "teams-tools"];
+
+  for (const tool of ALL_TOOLS.filter((t) => t.endsTurn)) {
+    for (const server of KNOWN_MCP_SERVERS) {
+      const sdkName = `mcp__${server}__${tool.name}`;
+
+      it(`isTurnTerminator(${sdkName}) === true`, () => {
+        // The SDK never emits bare names for MCP-served tools — it always
+        // includes the `mcp__<server>__` prefix. Strict equality against the
+        // registry's bare name was the production bug.
+        expect(isTurnTerminator(sdkName)).toBe(true);
+      });
+
+      it(`processAssistantMessage + isTurnTerminator: ${sdkName} flips state.turnTerminated`, () => {
+        // End-to-end check of the exact two-step the handler does:
+        //   block.name -> tools[].name (via processAssistantMessage)
+        //   tools[].name -> isTurnTerminator
+        // If either step normalizes inconsistently, this breaks.
+        const state = createStreamState();
+        const msg = {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "tool_1",
+                name: sdkName,
+                input: { text: "Hello sur" },
+              },
+            ],
+          },
+        } as unknown as SDKAssistantMessage;
+
+        const result = processAssistantMessage(msg, state);
+        expect(result.tools).toHaveLength(1);
+        expect(result.tools[0].name).toBe(sdkName);
+
+        // This is the exact line in handler.ts:
+        //     if (isTurnTerminator(tool.name)) state.turnTerminated = true;
+        if (isTurnTerminator(result.tools[0].name)) {
+          state.turnTerminated = true;
+        }
+        expect(state.turnTerminated).toBe(true);
+      });
+    }
+  }
+
+  it("non-terminator tools stay non-terminator under MCP prefixing", () => {
+    // Make sure prefix-stripping doesn't accidentally promote arbitrary
+    // tools to terminators.
+    const nonTerminators = ALL_TOOLS.filter((t) => !t.endsTurn);
+    expect(nonTerminators.length).toBeGreaterThan(0);
+    for (const tool of nonTerminators.slice(0, 5)) {
+      for (const server of KNOWN_MCP_SERVERS) {
+        expect(isTurnTerminator(`mcp__${server}__${tool.name}`)).toBe(false);
+      }
+    }
   });
 });

@@ -24,7 +24,7 @@ import { log, logError, logWarn } from "../../util/log.js";
 import { traceMessage } from "../../util/trace.js";
 import { incrementCounter, recordHistogram } from "../../util/metrics.js";
 import { formatFullDatetime } from "../../util/time.js";
-import { isTurnTerminator } from "../../core/tools/index.js";
+import { isTurnTerminator, stripMcpPrefix } from "../../core/tools/index.js";
 
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import type { QueryParams, QueryResult } from "../../core/types.js";
@@ -99,15 +99,20 @@ export async function handleMessage(
   // so the end-of-turn trailing-text fallback can dedupe against content
   // already delivered. Without this, a model that writes prose AND calls a
   // delivery tool with similar text would surface twice in the chat.
+  //
+  // Tool names arrive MCP-prefixed (e.g. `mcp__telegram-tools__end_turn`)
+  // when routed through MCP — strip the prefix so equality checks match
+  // the registry's bare names.
   const captureDeliveredText = (
     toolName: string,
     input: Record<string, unknown>,
   ): void => {
+    const bareName = stripMcpPrefix(toolName);
     let deliveredText: string | undefined;
-    if (toolName === "end_turn" && typeof input.text === "string") {
+    if (bareName === "end_turn" && typeof input.text === "string") {
       deliveredText = input.text;
     } else if (
-      toolName === "send" &&
+      bareName === "send" &&
       input.type === "text" &&
       typeof input.text === "string"
     ) {
@@ -169,25 +174,24 @@ export async function handleMessage(
           }
         }
 
-        // Turn-terminator tool was called (e.g. `end_turn`). Abort the SDK
-        // loop cleanly so the model can't keep producing trailing scratchpad
-        // after declaring "I'm done". Without this, the model is free to
-        // think more, call more tools, or write more prose — and any prose
-        // afterwards trips the flow-violation re-prompt path. Calling
-        // qi.interrupt() lets the SDK yield its terminal result and exit
-        // the for-await loop on the next iteration.
-        if (state.turnTerminated) {
-          try {
-            await qi.interrupt();
-          } catch (err) {
-            // Non-fatal: interrupt failures shouldn't break the turn,
-            // they just mean the natural end-of-stream path will run.
-            logWarn(
-              "agent",
-              `[${chatId}] qi.interrupt() after turn terminator failed: ${(err as Error)?.message ?? err}`,
-            );
-          }
-        }
+        // Note: we previously called `qi.interrupt()` here when a turn-
+        // terminator tool fired, intending to short-circuit the SDK's
+        // wasted "wrap up after end_turn tool_result" follow-up API call
+        // (~3s of phantom typing while the model says nothing useful).
+        // That interrupt races with in-flight MCP tool dispatches in the
+        // same assistant message — `end_turn` itself is an MCP tool, and
+        // the model frequently emits sibling tool_use blocks in the same
+        // message. interrupt cancels their AbortController mid-flight,
+        // which surfaces as `MCP error -32001: AbortError` in the SDK
+        // result and bubbles up to the user as "Something went wrong".
+        //
+        // The natural-close path is fine: the SDK does one more API call
+        // after end_turn returns (the model has nothing to say so it
+        // returns a stop turn quickly, ~2-3s typing lag), then yields a
+        // result message and exits the iterator cleanly. We accept the
+        // typing lag in exchange for not breaking turns. `state.turnTerminated`
+        // is still tracked so the flow-violation re-prompt path below can
+        // skip its retry when the model explicitly ended its turn.
         continue;
       }
 

@@ -48,7 +48,14 @@ import type {
 // ── Fixture helpers ─────────────────────────────────────────────────────────
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const STUB_BINARY = resolve(__dirname, "fake-claude.mjs");
+// On Windows, Node 20.19+ refuses to spawn `.cmd` shims via child_process
+// (CVE-2024-27980 mitigation). The SDK calls `spawn` directly without
+// `shell: true`, so we use a SEA-compiled (.exe) binary instead. Build
+// it once before the test run via `npm run build:stub-sea`.
+const STUB_BINARY = resolve(
+  __dirname,
+  process.platform === "win32" ? "fake-claude.exe" : "fake-claude.mjs",
+);
 
 export function assistantText(text: string): StubAssistant {
   const block: TextBlock = { type: "text", text };
@@ -89,6 +96,41 @@ export function successResult(text = ""): StubResult {
  * Use this to verify hook wiring: the SDK only fires hooks if `options.hooks`
  * was correctly translated into the init handshake's `hookCallbackIds`.
  */
+/**
+ * Convenience: emit an assistant message that delivers `text` through the
+ * canonical `end_turn` tool call, plus the matching PostToolBatch hook fire
+ * (which is how the real production hook terminates the SDK loop).
+ *
+ * Mirrors the pattern Talon's system prompt teaches the model: final replies
+ * go through `end_turn(text=...)`. Drop-in for tests that want to exercise
+ * the production delivery path.
+ */
+export function endTurnWithText(
+  text: string,
+  toolUseId?: string,
+): [StubAssistant, ReturnType<typeof fireHook>] {
+  const id = toolUseId ?? "toolu_" + randomUUID().slice(0, 8);
+  const assistant = assistantToolUse(
+    "mcp__telegram-tools__end_turn",
+    { text },
+    id,
+  );
+  const hook = fireHook(
+    "PostToolBatch",
+    {
+      tool_calls: [
+        {
+          tool_name: "mcp__telegram-tools__end_turn",
+          tool_input: { text },
+          tool_use_id: id,
+        },
+      ],
+    },
+    id,
+  );
+  return [assistant, hook];
+}
+
 export function fireHook(
   event:
     | "PreToolUse"

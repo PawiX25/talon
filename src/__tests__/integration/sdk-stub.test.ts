@@ -24,7 +24,23 @@ import {
   fireHook,
 } from "./stub-claude/helpers.js";
 
-describe("SDK integration (stub binary)", () => {
+// On Windows the stub binary is a SEA-compiled `.exe` (built via
+// `npm run build:stub-sea`). On POSIX it's the `.mjs` source with shebang.
+// If the .exe isn't present (build step skipped), we skip the suite cleanly
+// rather than fail with `ENOENT`.
+import { existsSync } from "node:fs";
+import { resolve as resolvePath, dirname as dirnamePath } from "node:path";
+import { fileURLToPath as fileUrl } from "node:url";
+const __testDir = dirnamePath(fileUrl(import.meta.url));
+const stubBinaryPath = resolvePath(
+  __testDir,
+  process.platform === "win32"
+    ? "stub-claude/fake-claude.exe"
+    : "stub-claude/fake-claude.mjs",
+);
+const stubReady = existsSync(stubBinaryPath);
+
+describe.skipIf(!stubReady)("SDK integration (stub binary)", () => {
   it("completes a simple text-only turn", async () => {
     const result = await runWithStub({
       prompt: "say hi",

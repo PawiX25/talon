@@ -6,6 +6,7 @@
  */
 
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type {
   Options,
   PostToolBatchHookInput,
@@ -45,10 +46,17 @@ export function buildMcpServers(
   const config = getConfig();
   const bridgeUrl = `http://127.0.0.1:${getBridgePort()}`;
 
-  const tsxImport = resolve(
-    import.meta.dirname ?? ".",
-    "../../../node_modules/tsx/dist/esm/index.mjs",
-  );
+  // tsx as a Node loader is passed via `--import <url>`. Node accepts URLs
+  // or absolute paths, but on Windows a raw backslash path (`D:\…\tsx`) is
+  // ambiguous between path and URL — the loader hook fails to register and
+  // every subsequent `import` of a .ts file throws. `pathToFileURL` produces
+  // a cross-platform `file://` URL that Node always treats as a loader URL.
+  const tsxImport = pathToFileURL(
+    resolve(
+      import.meta.dirname ?? ".",
+      "../../../node_modules/tsx/dist/esm/index.mjs",
+    ),
+  ).href;
   const mcpServerPath = resolve(
     import.meta.dirname ?? ".",
     "../../core/tools/mcp-server.ts",
@@ -72,12 +80,14 @@ export function buildMcpServers(
       TALON_CHAT_ID: chatId,
       TALON_FRONTEND: frontend,
     };
+    // `node --import <tsx-loader>` everywhere — tsx as a Node loader works
+    // identically on Windows and POSIX, and avoids spawning `npx.cmd` (which
+    // Node 20.19+ refuses to execute via child_process.spawn without
+    // shell:true; CVE-2024-27980 mitigation). The wrapping launcher would
+    // hit the same .cmd ban when calling its child.
     servers[serverName] = wrapMcpServer({
-      command: process.platform === "win32" ? "npx" : "node",
-      args:
-        process.platform === "win32"
-          ? ["tsx", mcpServerPath]
-          : ["--import", tsxImport, mcpServerPath],
+      command: "node",
+      args: ["--import", tsxImport, mcpServerPath],
       env: mcpEnv,
     });
   }

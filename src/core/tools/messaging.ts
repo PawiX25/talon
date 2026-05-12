@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
-import { idSchema } from "./schemas.js";
+import { chatIdSchema, idSchema } from "./schemas.js";
 
 export const messagingTools: ToolDefinition[] = [
   // ── end_turn — explicit final-reply delivery ──────────────────────────
@@ -164,20 +164,31 @@ Examples:
         .number()
         .optional()
         .describe("Schedule: delay before sending (1-3600)"),
-      chat_id: idSchema
+      chat_id: chatIdSchema
         .optional()
         .describe(
-          "Target chat ID. Omit to send to the current chat (chat mode). Required from heartbeat mode where there is no ambient chat — use list_chats or known IDs from memory.",
+          "Target chat ID. Omit to send to the current chat (chat mode). Required from heartbeat mode where there is no ambient chat — use list_chats or known IDs from memory. Telegram supergroup/channel IDs are negative (e.g. -1001426819337); user DMs are positive.",
         ),
     },
     execute: async (params, bridge) => {
       const { type } = params;
+      // Thread chat_id through to every bridge call so heartbeat / dream
+      // outbound (no ambient chat) gets routed by the explicit chat_id.
+      // `createBridge` at src/core/tools/bridge.ts:29 reads
+      // `params.chat_id` from the bridge payload (NOT from the
+      // tool-input params) and promotes it to `_chatId` for the
+      // gateway. If we don't include chat_id here, the bridge falls
+      // back to the spawn-time TALON_CHAT_ID env (the "heartbeat"
+      // sentinel) and the gateway rejects with "No active chat
+      // context and no explicit numeric chat_id".
+      const chat_id = params.chat_id;
       switch (type) {
         case "text": {
           if (params.delay_seconds) {
             return bridge("schedule_message", {
               text: params.text,
               delay_seconds: params.delay_seconds,
+              chat_id,
             });
           }
           if (params.buttons) {
@@ -185,11 +196,13 @@ Examples:
               text: params.text,
               rows: params.buttons,
               reply_to_message_id: params.reply_to,
+              chat_id,
             });
           }
           return bridge("send_message", {
             text: params.text,
             reply_to_message_id: params.reply_to,
+            chat_id,
           });
         }
         case "photo":
@@ -197,24 +210,28 @@ Examples:
             file_path: params.file_path,
             caption: params.caption,
             reply_to: params.reply_to,
+            chat_id,
           });
         case "file":
           return bridge("send_file", {
             file_path: params.file_path,
             caption: params.caption,
             reply_to: params.reply_to,
+            chat_id,
           });
         case "video":
           return bridge("send_video", {
             file_path: params.file_path,
             caption: params.caption,
             reply_to: params.reply_to,
+            chat_id,
           });
         case "voice":
           return bridge("send_voice", {
             file_path: params.file_path,
             caption: params.caption,
             reply_to: params.reply_to,
+            chat_id,
           });
         case "audio":
           return bridge("send_audio", {
@@ -223,17 +240,20 @@ Examples:
             title: params.title,
             performer: params.performer,
             reply_to: params.reply_to,
+            chat_id,
           });
         case "animation":
           return bridge("send_animation", {
             file_path: params.file_path,
             caption: params.caption,
             reply_to: params.reply_to,
+            chat_id,
           });
         case "sticker":
           return bridge("send_sticker", {
             file_id: params.file_id,
             reply_to: params.reply_to,
+            chat_id,
           });
         case "poll":
           return bridge("send_poll", {
@@ -243,20 +263,23 @@ Examples:
             correct_option_id: params.correct_option_id,
             explanation: params.explanation,
             type: params.correct_option_id !== undefined ? "quiz" : "regular",
+            chat_id,
           });
         case "location":
           return bridge("send_location", {
             latitude: params.latitude,
             longitude: params.longitude,
+            chat_id,
           });
         case "contact":
           return bridge("send_contact", {
             phone_number: params.phone_number,
             first_name: params.first_name,
             last_name: params.last_name,
+            chat_id,
           });
         case "dice":
-          return bridge("send_dice", { emoji: params.emoji });
+          return bridge("send_dice", { emoji: params.emoji, chat_id });
         default:
           return { ok: false, error: `Unknown type: ${type}` };
       }
@@ -335,10 +358,10 @@ Valid emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 �
         .describe(
           "Whether this reaction ends the turn. Defaults to true (omit). Pass false to keep the turn alive after reacting.",
         ),
-      chat_id: idSchema
+      chat_id: chatIdSchema
         .optional()
         .describe(
-          "Target chat ID. Omit in chat mode (uses ambient chat). Required from heartbeat mode.",
+          "Target chat ID. Omit in chat mode (uses ambient chat). Required from heartbeat mode. Supergroup/channel IDs are negative; user DMs are positive.",
         ),
     },
     // Strip end_turn before bridging — it's a hook-level signal, the

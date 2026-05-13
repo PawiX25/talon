@@ -142,18 +142,6 @@ const playwrightConfigSchema = z.object({
   endpointFile: z.string().optional(),
 });
 
-const playwrightConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  /** Browser engine: chromium (default), chrome, firefox, webkit, msedge */
-  browser: z.string().optional(),
-  /** Run headless (default: true) */
-  headless: z.boolean().default(true),
-  /** Connect to an existing browser websocket endpoint. */
-  endpoint: z.string().optional(),
-  /** Read the browser websocket endpoint from a file. */
-  endpointFile: z.string().optional(),
-});
-
 const configSchema = z.object({
   frontend: z.union([frontendEnum, z.array(frontendEnum)]).default("telegram"),
   botToken: z.string().optional(),

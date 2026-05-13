@@ -2,6 +2,11 @@ FROM node:22-slim
 
 WORKDIR /app
 
+# Build tools for native node-gyp deps (utf-8-validate etc.).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 # Install Claude Code CLI globally (required by the Agent SDK to spawn its
 # subprocess for streaming + model discovery).
 RUN npm install -g @anthropic-ai/claude-code

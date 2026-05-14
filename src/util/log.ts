@@ -41,6 +41,7 @@ export type LogComponent =
   | "gateway"
   | "plugin"
   | "teams"
+  | "discord"
   | "config"
   | "access"
   | "github"

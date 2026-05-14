@@ -14,7 +14,10 @@ export type QueryParams = {
   text: string;
   senderName: string;
   isGroup?: boolean;
-  messageId?: number;
+  /**
+   * Provider message ID. Telegram is numeric; Discord snowflakes are strings.
+   */
+  messageId?: number | string;
   onStreamDelta?: (accumulated: string, phase?: "thinking" | "text") => void;
   onTextBlock?: (text: string) => Promise<void>;
   onToolUse?: (toolName: string, input: Record<string, unknown>) => void;
@@ -138,7 +141,8 @@ export type ExecuteParams = {
   prompt: string;
   senderName: string;
   isGroup: boolean;
-  messageId?: number;
+  /** Provider message ID. Numeric for Telegram, string snowflake for Discord. */
+  messageId?: number | string;
   source: "message" | "pulse" | "cron" | "trigger";
   onStreamDelta?: (accumulated: string, phase?: "thinking" | "text") => void;
   onTextBlock?: (text: string) => Promise<void>;
@@ -157,7 +161,13 @@ export type ActionResult = {
   ok: boolean;
   text?: string;
   error?: string;
-  message_id?: number;
+  /**
+   * Provider message ID. Telegram uses numeric IDs; Discord (and other
+   * snowflake-based platforms) emit string IDs. The dispatcher treats it
+   * opaquely — it's surfaced back to the LLM as-is for use in subsequent
+   * tool calls (react/edit/delete) that target this message.
+   */
+  message_id?: number | string;
   [key: string]: unknown;
 };
 

@@ -59,6 +59,10 @@ if (selectedFrontend === "terminal") {
   const { createTeamsFrontend } = await import("./frontend/teams/index.js");
   frontend = createTeamsFrontend(config, gateway);
   log("bot", "Frontend: Teams");
+} else if (selectedFrontend === "discord") {
+  const { createDiscordFrontend } = await import("./frontend/discord/index.js");
+  frontend = createDiscordFrontend(config, gateway);
+  log("bot", "Frontend: Discord");
 } else {
   const { createTelegramFrontend } =
     await import("./frontend/telegram/index.js");

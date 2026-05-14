@@ -37,7 +37,7 @@ import type { QueryBackend, ContextManager } from "./core/types.js";
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type Frontend = {
-  name: "telegram" | "terminal" | "teams";
+  name: "telegram" | "terminal" | "teams" | "discord";
   context: ContextManager;
   sendTyping: (chatId: number) => Promise<void>;
   sendMessage: (chatId: number, text: string) => Promise<void>;

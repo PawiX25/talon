@@ -98,7 +98,40 @@ const pluginEntrySchema = z
   })
   .pipe(z.union([pluginPathSchema, pluginMcpSchema]));
 
-const frontendEnum = z.enum(["telegram", "terminal", "teams"]);
+const frontendEnum = z.enum(["telegram", "terminal", "teams", "discord"]);
+
+const discordConfigSchema = z
+  .object({
+    /** Discord bot token (from https://discord.com/developers/applications). */
+    botToken: z.string(),
+    /**
+     * Discord application (client) ID. Found on the same Developer Portal
+     * page as the bot token. Required for slash-command registration via
+     * `Routes.applicationCommands(...)`.
+     */
+    applicationId: z.string(),
+    /** User IDs allowed to DM the bot. Empty array disables DM access. */
+    allowedUsers: z.array(z.string()).default([]),
+    /** Guild IDs the bot is permitted to operate in. */
+    allowedGuilds: z.array(z.string()).default([]),
+    /** Optional channel ID allowlist within `allowedGuilds`. Empty = all channels. */
+    allowedChannels: z.array(z.string()).default([]),
+    /** User IDs with /admin command access. */
+    adminUserIds: z.array(z.string()).default([]),
+    /**
+     * In guilds, when does the bot reply?
+     *   - "mention"  reply only when @mentioned or in a reply chain (default)
+     *   - "channel"  reply to every message in allowedChannels
+     */
+    respondMode: z.enum(["mention", "channel"]).default("mention"),
+    /** Auto-leave guilds not on `allowedGuilds`. */
+    leaveUnauthorizedGuilds: z.boolean().default(true),
+    /** Custom status text shown under the bot's name. */
+    presence: z.string().optional(),
+    /** Enable global slash command + DM command registration. */
+    enableDmCommands: z.boolean().default(true),
+  })
+  .strict();
 
 const playwrightConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -164,6 +197,9 @@ const configSchema = z.object({
 
   // Playwright — headless browser automation via MCP
   playwright: playwrightConfigSchema.optional(),
+
+  // Discord — discord.js v14-based frontend
+  discord: discordConfigSchema.optional(),
 
   // Display name shown in terminal UI (defaults to "Talon")
   botDisplayName: z.string().default("Talon"),

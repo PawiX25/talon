@@ -30,7 +30,7 @@ let client: OpencodeClient | null = null;
 let clientPromise: Promise<OpencodeClient> | null = null;
 let serverHandle: { url: string; close(): void } | null = null;
 let gatewayPortFn: () => number = () => 19876;
-let frontendName: "telegram" | "terminal" | "teams" = "telegram";
+let frontendName: "telegram" | "terminal" | "teams" | "discord" = "telegram";
 const modelProviderCache = new Map<string, string>();
 
 const OPENCODE_HOSTNAME = "127.0.0.1";
@@ -59,7 +59,7 @@ function createStrictOpencodeClient(baseUrl: string): OpencodeClient {
 export function initOpenCodeAgent(
   cfg: TalonConfig,
   getGatewayPort?: () => number,
-  frontend?: "telegram" | "terminal" | "teams",
+  frontend?: "telegram" | "terminal" | "teams" | "discord",
 ): void {
   config = cfg;
   if (getGatewayPort) gatewayPortFn = getGatewayPort;

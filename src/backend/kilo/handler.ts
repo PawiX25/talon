@@ -42,8 +42,6 @@ import {
   ensureSession,
   ensureChatMcpServer,
   ensurePluginMcpServers,
-  buildToolOverrides,
-  disconnectChatMcpServer,
   resolveProviderID,
   parseStoredKiloModelSelection,
   getConfig,
@@ -51,19 +49,15 @@ import {
   errMsg,
 } from "./server.js";
 import {
-  extractPartsSummary,
   extractAssistantUsage,
   getKiloTurnSummary,
-  waitForAssistantReply,
   rejectPendingQuestions,
   type KiloAssistantInfo,
 } from "./sessions.js";
 import {
   createStreamState,
-  appendText,
   recordTokens,
   finalizeResponseText,
-  detectFlowViolation,
   formatUserPrompt,
   prepareSystemPrompt,
   extractSessionName,
@@ -101,7 +95,6 @@ export async function handleMessage(
     isGroup,
     messageId,
     onTextBlock,
-    onStreamDelta,
     onToolUse,
   } = params;
   const t0 = Date.now();
@@ -117,10 +110,20 @@ export async function handleMessage(
   const oc = await ensureServer();
   const providerID =
     selectedProviderID ?? (await resolveProviderID(oc, modelID));
+  log(
+    "agent",
+    `[${chatId}] Kilo model resolved: provider=${providerID} model=${modelID}` +
+      (selectedProviderID ? "" : " (provider via catalog lookup)"),
+  );
   const sessionId = await ensureSession(oc, chatId);
-  const chatMcpServerName = await ensureChatMcpServer(oc, chatId);
+  await ensureChatMcpServer(oc, chatId);
   await ensurePluginMcpServers(oc, chatId);
-  const toolOverrides = await buildToolOverrides(oc, chatMcpServerName);
+  // Note: we deliberately don't pass `tools` to promptAsync below.
+  // The session was created with a `permission` ruleset
+  // (see ensureSession in server.ts) that allow-lists *this* chat's
+  // MCP tools and deny-lists other chats' tools, plus auto-allows
+  // built-in `read` / `bash` / `edit`. The deprecated `tools` map
+  // and the per-prompt overrides it required are subsumed by that.
 
   // Build the prompt (time tag + sender + msg_id reference)
   const prompt = formatUserPrompt({
@@ -147,10 +150,23 @@ export async function handleMessage(
   const seenQuestionIds = new Set<string>();
   const seenToolCallIds = new Set<string>();
 
+  const setupMs = Date.now() - t0;
+  let promptMs = 0;
+
   try {
     // Drive the Kilo turn: subscribe to SSE events in parallel with
-    // promptAsync, surface deltas + tool calls into shared state, and
+    // promptAsync, surface tool calls + terminator into shared state, and
     // exit when the turn closes / goes idle.
+    //
+    // Note: `onStreamDelta` is intentionally NOT forwarded. Telegram's
+    // delivery contract is "send the final reply once" — Talon doesn't
+    // want live edit_message updates exposing the model's chain-of-thought
+    // scratchpad to the user. We still process delta events (for tool-call
+    // detection and the eventCounts diagnostic), just without the UI
+    // callback firing per token. Final delivery happens through `end_turn`
+    // / `send` tool calls, which call `onTextBlock` once with the
+    // committed message.
+    const turnStart = Date.now();
     await runKiloTurn({
       oc,
       sessionId,
@@ -158,15 +174,15 @@ export async function handleMessage(
       systemPrompt,
       providerID,
       modelID,
-      toolOverrides,
       state,
       chatId,
       seenQuestionIds,
       seenToolCallIds,
-      onStreamDelta,
+      onStreamDelta: undefined,
       onTextBlock,
       onToolUse,
     });
+    promptMs = Date.now() - turnStart;
   } catch (err) {
     const classified = classify(err);
     incrementCounter(`errors.${classified.reason ?? "unknown"}`);
@@ -207,7 +223,13 @@ export async function handleMessage(
     if (activeSessions.get(chatId) === sessionId) {
       activeSessions.delete(chatId);
     }
-    await disconnectChatMcpServer(oc, chatMcpServerName);
+    // Note: we deliberately do NOT disconnect the chat MCP server here.
+    // The server is named per-chat (`talon-tools-<chatId>`) so it's safe
+    // to keep across turns of the same chat, and re-spawning the
+    // subprocess each turn was costing ~800ms per message. The local
+    // registration cache (server.ts) skips the duplicate `add` calls now.
+    // `disconnectChatMcpServer` remains exported for explicit teardown
+    // (shutdown, plugin reload).
   }
 
   // ── Post-loop accounting ──────────────────────────────────────────────────
@@ -265,58 +287,113 @@ export async function handleMessage(
     if (name) setSessionName(chatId, name);
   }
 
-  // ── Flow-violation re-prompt ──────────────────────────────────────────────
+  // ── Delivery ──────────────────────────────────────────────────────────────
+  //
+  // Two routes a reply can reach the user:
+  //
+  //   1. Delivery tool — `end_turn` / `send` / `react`. The tool itself
+  //      bridges to Telegram (see core/tools/messaging.ts), so the
+  //      message has already been sent by the time we get here. Talon
+  //      records `state.deliveredTextNorms` for dedup; we don't re-emit.
+  //
+  //   2. Plain text part — Kilo's default for routed models (DeepSeek,
+  //      GLM, openrouter). `finalizePartsIntoState` extracts text-part
+  //      content (reasoning stays private) into `state.allResponseText`.
+  //      We ship that here via `onTextBlock`.
+  //
+  // Empty turn fallback: if neither path produced anything, the model
+  // either crashed mid-reasoning or went into a tool-call loop without
+  // delivering. Surface a concise notice so the user isn't left staring
+  // at silence.
 
-  const violation = detectFlowViolation({
-    trailingText: state.lastTrailingText || responseText,
-    turnTerminated: state.turnTerminated,
-    deliveredTextNorms: state.deliveredTextNorms,
-    retried: _retried,
-  });
+  let delivery: {
+    route: "text-part" | "tool" | "synthetic-error" | "empty";
+    chars: number;
+  };
 
-  if (violation.violated) {
-    incrementCounter("scratchpad.trailing_text_dropped");
-    log(
+  if (state.deliveredTextNorms.length > 0 || state.hadBridgeDelivery) {
+    // A bridge-delivering tool (`end_turn` / `send`) already shipped
+    // the message via the bridge. Drop any text-part content — Kilo
+    // models routinely emit a follow-up text part after a tool call
+    // that contains the model's chain-of-thought commentary
+    // ("That worked. The 'No active chat context' error needed the
+    // chat_id explicitly — already fixed.") rather than a separate
+    // reply. Surfacing both produces a visible double-message in
+    // Telegram. We check both `deliveredTextNorms` (tracks `end_turn`
+    // and `send(type="text")` for dedup-by-substring) and
+    // `hadBridgeDelivery` (catches `send(type="photo"|"poll"|...)`
+    // which still puts a message in chat but doesn't carry text args).
+    delivery = {
+      route: "tool",
+      chars: state.deliveredTextNorms.reduce((n, d) => n + d.length, 0),
+    };
+  } else if (state.syntheticError && !responseText) {
+    // Kilo hit an internal failure (e.g. "model hit its output limit
+    // while reasoning") and emitted a synthetic text part instead of a
+    // real reply. We don't ship the raw upstream string — it reads as
+    // if the model itself answered with technical advice. Convert into
+    // a Talon error message that points at the actionable bits.
+    delivery = {
+      route: "synthetic-error",
+      chars: state.syntheticError.length,
+    };
+    incrementCounter("kilo.synthetic_error");
+    logWarn(
       "agent",
-      `[${chatId}] flow violation (Kilo): trailing prose (${violation.trailing.length} chars) ` +
-        `without end_turn/send. ${
-          violation.shouldRetry
-            ? "Re-prompting with reminder."
-            : "Already retried — accepting silent drop."
-        }`,
+      `[${chatId}] Kilo synthetic error in response: ${formatSyntheticPreview(state.syntheticError)}`,
     );
-    if (violation.shouldRetry) {
-      incrementCounter("scratchpad.flow_violation_retried");
-      return handleMessage({ ...params, text: violation.reminder }, true);
+    if (onTextBlock) {
+      try {
+        await onTextBlock(`⚠️ Kilo: ${state.syntheticError}`);
+      } catch (err) {
+        logWarn(
+          "agent",
+          `[${chatId}] onTextBlock (synthetic-error) failed: ${errMsg(err)}`,
+        );
+      }
     }
-  }
-
-  // ── Final delivery ────────────────────────────────────────────────────────
-  //
-  // Two delivery paths converge here:
-  //
-  //   1. Tool-driven delivery (`end_turn` / `send`) — text already shipped
-  //      to the user inside the tool call. `state.deliveredTextNorms` is
-  //      non-empty and `responseText` may also contain a duplicate. We
-  //      DON'T re-emit through onTextBlock in this case (dedup short-
-  //      circuits in flow-violation check above).
-  //
-  //   2. Plain assistant text — no delivery tool fired. The model returned
-  //      a conversational reply as raw text. We emit it via onTextBlock so
-  //      the frontend ships it as a regular Telegram message.
-
-  if (
-    onTextBlock &&
+  } else if (responseText && !state.turnTerminated) {
+    // Plain text part — ship it.
+    delivery = { route: "text-part", chars: responseText.length };
+    if (onTextBlock) {
+      try {
+        await onTextBlock(responseText);
+      } catch (err) {
+        logWarn("agent", `[${chatId}] onTextBlock failed: ${errMsg(err)}`);
+      }
+    }
+  } else if (
     !state.turnTerminated &&
-    responseText &&
-    !violation.violated
+    !responseText &&
+    state.deliveredTextNorms.length === 0
   ) {
-    try {
-      await onTextBlock(responseText);
-    } catch (err) {
-      logWarn("agent", `[${chatId}] onTextBlock failed: ${errMsg(err)}`);
+    delivery = { route: "empty", chars: 0 };
+    incrementCounter("scratchpad.empty_turn");
+    if (onTextBlock) {
+      try {
+        await onTextBlock(
+          state.toolCalls > 0
+            ? "(no reply — model called tools but didn't produce output text)"
+            : "(no reply — model returned no output)",
+        );
+      } catch (err) {
+        logWarn(
+          "agent",
+          `[${chatId}] onTextBlock (empty-turn error) failed: ${errMsg(err)}`,
+        );
+      }
     }
+  } else {
+    // Edge case: terminated turn with no text and no delivered norms.
+    // Nothing to send (the model legitimately ended silently, e.g.
+    // `end_turn()` with no text). Don't surface the empty-turn warning.
+    delivery = { route: "tool", chars: 0 };
   }
+
+  log(
+    "agent",
+    `[${chatId}] delivery: ${delivery.route} (${delivery.chars} chars)`,
+  );
 
   log(
     "agent",
@@ -328,7 +405,11 @@ export async function handleMessage(
         cacheWrite: state.sdkCacheWrite,
       },
       { durationMs, toolCalls: state.toolCalls },
-    )})`,
+    )} terminator=${state.turnTerminated ? "yes" : "no"} ` +
+      `delivered=${state.deliveredTextNorms.length} ` +
+      `respLen=${responseText.length} ` +
+      `setup=${setupMs}ms turn=${promptMs}ms ` +
+      `events=${formatEventCounts(state.eventCounts)})`,
   );
   traceMessage(chatId, "out", responseText, {
     durationMs,
@@ -345,6 +426,36 @@ export async function handleMessage(
   };
 }
 
+// ── Logging helpers ────────────────────────────────────────────────────────
+
+/**
+ * One-line preview (~120 chars, whitespace-collapsed) of a synthetic
+ * error message for the operator log. Same shape as the prose-preview
+ * helper used elsewhere — short enough to fit in a tail, long enough
+ * to recognise the underlying Kilo error category at a glance.
+ */
+function formatSyntheticPreview(text: string, max = 120): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= max) return JSON.stringify(collapsed);
+  return JSON.stringify(collapsed.slice(0, max) + "…");
+}
+
+/**
+ * Compact summary of which SSE event types fired this turn. `{}` for a
+ * silent turn (which is itself a useful diagnostic — the SSE socket
+ * either dropped or never matched our session id). Otherwise renders as
+ * `delta×42,part.updated×1,turn.close×1` style.
+ */
+function formatEventCounts(counts: Record<string, number>): string {
+  const entries = Object.entries(counts);
+  if (entries.length === 0) return "none";
+  // Trim the noisy `message.` / `session.` prefixes so the line stays
+  // readable in the live log tail.
+  return entries
+    .map(([type, n]) => `${type.replace(/^(message|session)\./, "")}×${n}`)
+    .join(",");
+}
+
 // ── Internal: run one Kilo turn with SSE streaming ─────────────────────────
 
 interface RunKiloTurnInputs {
@@ -354,7 +465,6 @@ interface RunKiloTurnInputs {
   systemPrompt: string;
   providerID: string;
   modelID: string;
-  toolOverrides: Record<string, boolean> | undefined;
   state: ReturnType<typeof createStreamState>;
   chatId: string;
   seenQuestionIds: Set<string>;
@@ -367,24 +477,29 @@ interface RunKiloTurnInputs {
 /**
  * Run one Kilo turn end-to-end.
  *
- * Strategy:
- *   1. Send the prompt via `session.prompt` (the Kilo HTTP API returns
- *      after the turn completes; long timeouts are normal).
- *   2. In parallel, parse the response parts as they accumulate into the
- *      stream state. Kilo's REST `prompt` does NOT stream — but the parts
- *      list lands once the turn closes, and SSE events run alongside for
- *      mid-turn progress.
- *   3. When `end_turn` / `send` / `react` is detected, optionally call
- *      `session.abort()` to short-circuit the model's "wrap up" round
- *      trip the way Claude SDK's PostToolBatch hook does.
+ * Strategy (post-refactor):
+ *   1. Subscribe to SSE BEFORE issuing the prompt so no early events are
+ *      lost. The subscription tracks state mutations (tool calls,
+ *      synthetic errors, partID→type lookups) and resolves its promise
+ *      when the turn ends — `session.turn.close`, `session.idle`, or
+ *      `session.error` for our session.
+ *   2. Fire the prompt via `session.promptAsync`. That POST returns
+ *      immediately with a messageID; Kilo runs the model task in the
+ *      background and emits SSE events as it goes.
+ *   3. Await the SSE close event. Talon's await is therefore on event
+ *      iteration we control — never on a long-running HTTP call we
+ *      can't interrupt. If the upstream stalls, Kilo eventually fires
+ *      `session.error` (rate limit, timeout, model-not-found, etc.)
+ *      which closes the turn from the same path.
+ *   4. Read the authoritative parts list via `session.messages` and
+ *      drain it through `finalizePartsIntoState`.
  *
- * Why we still call `prompt` (not `promptAsync` + SSE-only):
- *   The synchronous `session.prompt` endpoint atomically returns the full
- *   `parts` array on completion. Combining it with SSE for progress
- *   updates gives us streaming UX (deltas, mid-turn tool callbacks) AND
- *   bulletproof final-state capture. Using `promptAsync` would force us
- *   to recover the final parts via a follow-up `session.messages` call —
- *   one more round-trip with no benefit for non-aborted turns.
+ * Why we don't use `session.prompt` (sync):
+ *   The sync endpoint holds the connection open until the upstream
+ *   model finishes. When the upstream stalls (free providers, network
+ *   blips), the HTTP POST hangs and our `await` blocks forever. With
+ *   `promptAsync` + SSE, "the model is taking too long" becomes "no
+ *   events arriving" — observable and abortable.
  */
 async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
   const {
@@ -394,7 +509,6 @@ async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
     systemPrompt,
     providerID,
     modelID,
-    toolOverrides,
     state,
     chatId,
     seenQuestionIds,
@@ -404,7 +518,9 @@ async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
     onToolUse,
   } = inputs;
 
-  // Set up SSE subscription for mid-turn deltas + tool detection
+  // SSE subscription FIRST — Kilo can fire `session.turn.open` and
+  // early `message.part.updated` events immediately after promptAsync
+  // returns, so the iterator must already be alive.
   const sseAbort = new AbortController();
   const sseDone = subscribeToTurnEvents({
     oc,
@@ -416,11 +532,10 @@ async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
     onTextBlock,
     onToolUse,
     onTerminator: async () => {
-      // End_turn fired — abort the in-flight session so the model
-      // doesn't burn another round-trip "wrapping up" after declaring
-      // done. The prompt() call below will reject with an abort error
-      // which the caller's retry classifier ignores (turnTerminated is
-      // set).
+      // End_turn fired — abort the in-flight session so Kilo doesn't
+      // burn another round-trip "wrapping up" after the model declared
+      // done. session.idle then fires for our session and the SSE
+      // iterator exits cleanly.
       try {
         await oc.session.abort({ sessionID: sessionId });
       } catch (err) {
@@ -430,9 +545,9 @@ async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
     abortSignal: sseAbort.signal,
   });
 
-  // Watchdog: reject pending Kilo questions in the background. Talon
-  // manages its own tool permissions, so any question Kilo raises mid-
-  // turn (tool approval, follow-up clarification) is auto-handled.
+  // Question watchdog (existing): Talon manages its own tool permissions,
+  // so any Kilo-side question (tool approval, clarification) is rejected
+  // automatically.
   const questionWatchdog = (async () => {
     while (!sseAbort.signal.aborted) {
       try {
@@ -448,26 +563,35 @@ async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
   })();
 
   try {
-    // Synchronous prompt — returns when the turn closes (success or abort)
-    const resp = await oc.session.prompt({
+    // Fire and forget — promptAsync returns immediately. The HTTP POST
+    // itself can't hang us; the await below is on the SSE close event.
+    // No `tools` field: the deprecated per-prompt tool override map has
+    // been merged into session-level `permission` rules, which we set in
+    // ensureSession (server.ts). That ruleset already constrains tool
+    // visibility per chat — passing `tools` here would be redundant.
+    await oc.session.promptAsync({
       sessionID: sessionId,
       parts: [{ type: "text", text: prompt }],
       model: { providerID, modelID },
       system: systemPrompt,
-      ...(toolOverrides ? { tools: toolOverrides } : {}),
     });
 
-    // Post-turn: process the final parts list as authoritative state.
-    // The SSE handler may have caught some of these mid-flight, but the
-    // sync response is the source of truth for what landed.
-    const data = resp.data as Record<string, unknown> | undefined;
-    const parts = Array.isArray(data?.parts)
-      ? (data.parts as Array<Record<string, unknown>>)
+    // Await turn completion via SSE. Resolves when the iterator hits a
+    // `session.turn.close` / `session.idle` / `session.error` event for
+    // our sessionId, or when sseAbort fires (manual abort path).
+    await sseDone;
+
+    // Read authoritative final state from the messages endpoint. The
+    // SSE handler already populated state.allResponseText / tool calls
+    // mid-flight; this re-reads to fill anything SSE missed (race
+    // between turn.close and message persist) and to confirm parts.
+    const messagesResp = await oc.session.messages({ sessionID: sessionId });
+    const messages = Array.isArray(messagesResp.data)
+      ? (messagesResp.data as Array<Record<string, unknown>>)
       : [];
-    const assistantInfo =
-      data?.info && typeof data.info === "object"
-        ? (data.info as KiloAssistantInfo)
-        : undefined;
+    const lastAssistant = findLastAssistantMessage(messages);
+    const parts = lastAssistant?.parts ?? [];
+    const assistantInfo = lastAssistant?.info;
 
     finalizePartsIntoState({
       parts,
@@ -478,9 +602,6 @@ async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
 
     if (assistantInfo) {
       const usage = extractAssistantUsage(assistantInfo);
-      // Only fill from sync response when SSE didn't already set non-zero
-      // counts (avoids double-attributing on backends that emit usage in
-      // both places).
       if (state.sdkInputTokens === 0 && state.sdkOutputTokens === 0) {
         recordTokens(state, {
           inputTokens: usage.inputTokens,
@@ -490,32 +611,8 @@ async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
         });
       }
     }
-
-    // Some Kilo turns return a parts list missing the assistant text
-    // entirely (race between session.prompt close and message persist).
-    // The fallback poll waits up to 10s for the assistant message to land
-    // in the session-messages endpoint.
-    if (
-      !state.allResponseText &&
-      !state.currentBlockText &&
-      !state.turnTerminated
-    ) {
-      const fallback = await waitForAssistantReply(
-        oc,
-        sessionId,
-        Date.now() - 60_000,
-        chatId,
-        seenQuestionIds,
-      );
-      if (fallback.text) {
-        // Replay through the same state-mutator path so dedup + tool
-        // tracking stay consistent.
-        appendText(state, fallback.text);
-      }
-    }
   } catch (err) {
-    // If the model called end_turn, we intentionally aborted — the
-    // resulting "request aborted" error must NOT propagate.
+    // If the model called end_turn we aborted intentionally — swallow.
     if (state.turnTerminated && /abort/i.test(errMsg(err))) {
       return;
     }
@@ -524,14 +621,36 @@ async function runKiloTurn(inputs: RunKiloTurnInputs): Promise<void> {
     sseAbort.abort();
     await sseDone.catch(() => {});
     await questionWatchdog.catch(() => {});
-    // Final cleanup: reject any pending questions that landed in the
-    // brief window between abort and finally.
     try {
       await rejectPendingQuestions(oc, sessionId, chatId, seenQuestionIds);
     } catch {
       /* noop */
     }
   }
+}
+
+/**
+ * Find the most recent assistant message in a session-messages list
+ * and surface its parts + assistant info in a uniform shape.
+ *
+ * Kilo's `session.messages` returns the chronological list of all
+ * messages this session has ever produced. We only care about the
+ * last assistant message (the one that just landed via the prompt
+ * we issued).
+ */
+function findLastAssistantMessage(
+  messages: Array<Record<string, unknown>>,
+): { parts: Array<Record<string, unknown>>; info?: KiloAssistantInfo } | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    const info = m?.info as { role?: string } | undefined;
+    if (info?.role !== "assistant") continue;
+    const parts = Array.isArray(m.parts)
+      ? (m.parts as Array<Record<string, unknown>>)
+      : [];
+    return { parts, info: info as unknown as KiloAssistantInfo };
+  }
+  return null;
 }
 
 // ── SSE subscription ───────────────────────────────────────────────────────
@@ -592,21 +711,75 @@ async function subscribeToTurnEvents(inputs: SubscribeInputs): Promise<void> {
       if (abortSignal.aborted) break;
       if (!evt || typeof evt !== "object") continue;
 
-      const event = evt as {
+      // Kilo's SSE wire format wraps every event in `{payload: {type, properties}}`
+      // — confirmed by curling `/global/event` directly. The earlier handler
+      // read `evt.type` directly which was always undefined, so EVERY event
+      // got dropped (the `events=none` summary was a 100% miss rate). Unwrap
+      // here so type/properties land where the rest of the loop expects them.
+      const payload =
+        evt && typeof evt === "object" && "payload" in evt
+          ? (evt as { payload?: unknown }).payload
+          : evt;
+      if (!payload || typeof payload !== "object") continue;
+      const event = payload as {
         type?: string;
         properties?: Record<string, unknown>;
       };
 
       // session.error is observed here for logging; everything else goes
-      // through the shared pure helper.
+      // through the shared pure helper. Kilo's SSE stream is global —
+      // session.error events fire for every session, including the
+      // background heartbeat session — so scope-filter to our own
+      // sessionId before attributing the error to this chat. Without
+      // the scope filter, a heartbeat session.error would get logged
+      // under the chat's [chatId] prefix, which is misleading enough
+      // that it derailed an entire debugging session.
       if (event.type === "session.error") {
-        const errProp = (event.properties ?? {}).error as
-          | { name?: string }
-          | undefined;
-        if (errProp?.name) {
-          logWarn("agent", `[${chatId}] Kilo session.error: ${errProp.name}`);
+        const props = event.properties ?? {};
+        const evtSessionID =
+          typeof props.sessionID === "string" ? props.sessionID : undefined;
+        if (evtSessionID && evtSessionID !== sessionId) {
+          continue;
         }
-        continue;
+        const errProp = props.error as
+          | {
+              name?: string;
+              message?: string;
+              data?: Record<string, unknown>;
+            }
+          | undefined;
+        // MessageAbortedError is OUR own abort signal — fired when a
+        // terminator tool (`end_turn` / `send` / `react`) led us to call
+        // `oc.session.abort` to short-circuit the model's wrap-up
+        // round-trip. It's the EXPECTED close path, not an upstream
+        // failure. Don't stash it on syntheticError (would surface as
+        // `⚠️ Kilo: MessageAbortedError` to the user) and don't log it
+        // as a warning. Just exit the SSE loop cleanly.
+        const isOurAbort =
+          state.turnTerminated &&
+          (errProp?.name === "MessageAbortedError" ||
+            /abort/i.test(errProp?.name ?? "") ||
+            /abort/i.test(errProp?.message ?? ""));
+        if (errProp && !isOurAbort) {
+          const detail = [
+            errProp.name && `name=${errProp.name}`,
+            errProp.message && `message=${errProp.message}`,
+            errProp.data && `data=${JSON.stringify(errProp.data)}`,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          logWarn("agent", `[${chatId}] Kilo session.error: ${detail}`);
+          // Stash the error message on the stream state so the handler's
+          // delivery branch can surface it as `⚠️ Kilo: <message>`
+          // instead of leaving the user with silence.
+          const msg = errProp.message ?? errProp.name;
+          if (msg) state.syntheticError = msg;
+        }
+        // session.error for OUR session ends the turn — Kilo isn't going
+        // to produce any more events for this prompt. Without this break
+        // the SSE iterator would wait for a `turn.close` / `idle` that
+        // never arrives.
+        return;
       }
 
       const outcome = await processStreamEvent(event, {
@@ -619,7 +792,9 @@ async function subscribeToTurnEvents(inputs: SubscribeInputs): Promise<void> {
       });
 
       if (outcome.kind === "terminator_fired") {
-        incrementCounter(`tool_calls.${outcome.toolName}`);
+        // tool_calls counter increment happens per-tool inside
+        // events.ts processPartUpdate (parity with claude-sdk's
+        // count-every-tool semantics). Don't double-count here.
         // Fire-and-forget — abort the session so the model's post-
         // end_turn wrap-up doesn't burn another API call.
         onTerminator().catch(() => {});

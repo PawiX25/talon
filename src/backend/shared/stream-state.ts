@@ -20,7 +20,7 @@
  */
 
 import { captureDeliveredText } from "./delivered-text.js";
-import { isTurnTerminator } from "../../core/tools/index.js";
+import { isTurnTerminator, stripMcpPrefix } from "../../core/tools/index.js";
 
 // ── State shape ─────────────────────────────────────────────────────────────
 
@@ -45,6 +45,16 @@ export interface StreamState {
   turnTerminated: boolean;
   /** Normalized text args captured from delivery tools — used for dedup. */
   deliveredTextNorms: string[];
+  /**
+   * True when the model called any bridge-delivering tool this turn:
+   * `end_turn(...)` or `send(...)` of any type (text/photo/poll/voice/...).
+   * `deliveredTextNorms` only tracks `text`-bearing variants — needed for
+   * dedup against assistant prose — so it misses e.g. `send(type="photo")`
+   * which still puts a message in chat. The handler uses this flag to
+   * suppress an additional text-part delivery when the bridge already
+   * shipped something, preventing the doubled-message symptom.
+   */
+  hadBridgeDelivery: boolean;
 
   // ── Token accounting ──────────────────────────────────────────────────────
   /** Effective input tokens charged this turn. */
@@ -67,6 +77,41 @@ export interface StreamState {
   // ── Streaming bookkeeping ─────────────────────────────────────────────────
   /** Timestamp (ms) of the last delta callback — used to throttle UI updates. */
   lastStreamUpdate: number;
+
+  // ── Diagnostics ───────────────────────────────────────────────────────────
+  /**
+   * Per-event-type counts observed on the backend's stream this turn (e.g.
+   * Kilo SSE: `message.part.delta` × N). Backends increment this; the
+   * handler logs a summary at end-of-turn so operators can diagnose
+   * stuck/empty turns by inspecting which event types fired.
+   */
+  eventCounts: Record<string, number>;
+
+  /**
+   * Backend-generated error text peeled off the response (e.g. Kilo's
+   * synthetic "model hit its output limit while reasoning" message).
+   * The handler converts this into a user-friendly Talon error instead
+   * of shipping the raw upstream string as a chat reply. Empty when the
+   * turn produced no synthetic error.
+   */
+  syntheticError?: string;
+
+  /**
+   * partID → part type lookup populated from `message.part.updated` events.
+   *
+   * Kilo's `message.part.delta` events carry only `partID` and `field` —
+   * they don't say what type of part the delta belongs to. A delta with
+   * `field: "text"` could be filling the `text` field of a `TextPart`
+   * (the actual user-facing reply) OR the `text` field of a
+   * `ReasoningPart` (private scratchpad). Without the part-type lookup
+   * the SSE consumer can't tell them apart and ends up treating
+   * reasoning content as the reply.
+   *
+   * Backends populate this on every part.updated; the delta handler uses
+   * it to classify each delta against its source part. Empty for
+   * backends that don't have the same delta/part split.
+   */
+  partTypes: Map<string, string>;
 }
 
 // ── Factories ───────────────────────────────────────────────────────────────
@@ -80,6 +125,7 @@ export function createStreamState(): StreamState {
     toolCalls: 0,
     turnTerminated: false,
     deliveredTextNorms: [],
+    hadBridgeDelivery: false,
     sdkInputTokens: 0,
     sdkOutputTokens: 0,
     sdkCacheRead: 0,
@@ -88,6 +134,8 @@ export function createStreamState(): StreamState {
     contextWindow: undefined,
     numApiCalls: 0,
     lastStreamUpdate: 0,
+    eventCounts: {},
+    partTypes: new Map(),
   };
 }
 
@@ -141,9 +189,21 @@ export function recordToolUse(
   state.toolCalls += 1;
   const norm = captureDeliveredText(toolName, toolInput);
   if (norm) state.deliveredTextNorms.push(norm);
+  if (isBridgeDelivery(toolName)) {
+    state.hadBridgeDelivery = true;
+  }
   if (isTurnTerminator(toolName, toolInput)) {
     state.turnTerminated = true;
   }
+}
+
+// True for tools that ship content to the user via the bridge:
+// end_turn and send (any type). Excludes react and the read_*/get_* family.
+// Used to suppress a doubled text-part when the bridge already shipped
+// content (e.g. send(type="photo") followed by an assistant text part).
+function isBridgeDelivery(toolName: string): boolean {
+  const bare = stripMcpPrefix(toolName);
+  return bare === "end_turn" || bare === "send";
 }
 
 /**

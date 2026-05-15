@@ -16,6 +16,7 @@ import {
   createKiloClient,
   createKiloServer,
   type KiloClient,
+  type PermissionRule,
 } from "@kilocode/sdk/v2";
 import type { TalonConfig } from "../../util/config.js";
 import {
@@ -24,6 +25,7 @@ import {
   setSessionId,
 } from "../../storage/sessions.js";
 import { log, logWarn } from "../../util/log.js";
+import { wrapMcpCommand } from "../../util/mcp-launcher.js";
 import { clearModelCatalogCache } from "./models.js";
 import {
   guessProviderID,
@@ -46,58 +48,76 @@ let frontendName: "telegram" | "terminal" | "teams" | "discord" = "telegram";
  * against the fresh provider catalog. */
 const modelProviderCache = new Map<string, string>();
 
+/**
+ * Names of MCP servers we have already registered with the Kilo HTTP server
+ * during this Talon process. Kilo's `GET /mcp` (what `oc.mcp.status()` hits)
+ * empirically always returns `{}` regardless of the actual state, so we can't
+ * rely on the server to tell us what's already registered — we cache it
+ * locally instead. Cleared on `stopKiloServer` so a fresh process starts
+ * over.
+ *
+ * Kilo's POST /mcp is idempotent (a second `add` for an existing name
+ * returns the current state without re-spawning the subprocess), so the
+ * worst case of a stale cache is one wasted POST, not a crash. The benefit
+ * is large: skipping ~16 redundant POSTs per turn cuts ~12s off every
+ * Kilo turn's setup phase.
+ */
+const registeredMcpServers = new Set<string>();
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 /** Loopback hostname Talon binds the Kilo server on — never exposed externally. */
 export const KILO_HOSTNAME = "127.0.0.1";
-/** Default TCP port for the local Kilo server. */
-export const KILO_PORT = 4097;
+/** Default TCP port for the local Kilo server. Overridable via `KILO_PORT`
+ *  env var so integration tests can spawn an isolated Kilo server alongside
+ *  a running production Talon (which holds the default 4097). */
+export const KILO_PORT = Number(process.env.KILO_PORT ?? 4097);
 /** Convenience URL composed from KILO_HOSTNAME + KILO_PORT. */
 export const KILO_BASE_URL = `http://${KILO_HOSTNAME}:${KILO_PORT}`;
 /** MCP server name prefix used to namespace Talon's per-chat MCP registrations. */
 export const TALON_MCP_SERVER_NAME = "talon-tools";
 
 /**
+ * MCP add() calls slower than this get a `[slow]` annotation in the log
+ * so operators can spot misbehaving plugins or a sluggish Kilo server.
+ * Picked as a soft threshold — most local subprocess spawns finish in
+ * <500ms; the outliers are the ones worth investigating.
+ */
+const SLOW_MCP_REGISTRATION_MS = 1000;
+
+/**
  * System-prompt suffix appended to the user-configured system prompt.
  *
- * Talon's Telegram frontend supports two delivery flows in parallel:
+ * Kilo delivery model: the model's reply reaches the user via either
  *
- *   1. **Tool-driven delivery** (preferred — matches Claude SDK):
- *      Call `end_turn(text=...)` or `send(type="text", text=...)` to ship
- *      a final reply. This route preserves message-id targeting, button
- *      attachments, mid-turn `send` calls (photos, polls), and the
- *      scratchpad-by-contract that drops accidental prose silently.
+ *   1. A `type: "text"` part — what most Kilo-routed models emit by
+ *      default (DeepSeek, GLM, openrouter routes). Talon walks the
+ *      `parts` list at end of turn and ships text-part content via
+ *      `onTextBlock`. Reasoning parts are dropped as scratchpad.
  *
- *   2. **Text-as-reply fallback** (legacy OpenCode behaviour):
- *      Plain assistant text is delivered as a message at the end of the
- *      turn. Useful when the model is doing pure conversational replies
- *      and doesn't need rich-message control. The handler dedups against
- *      tool-emitted text so you can't accidentally double-send by using
- *      both paths.
+ *   2. A delivery tool — `end_turn` / `send` / `react`. The tool itself
+ *      bridges to Telegram, so it's the right path when you need
+ *      reply-to targeting, buttons, photos, polls, etc.
  *
- * The suffix tells the model both routes work; the Talon delivery layer
- * sorts out the rest.
+ * Both routes work; pick whichever fits the message. The suffix below
+ * keeps it short — the tool descriptions themselves carry the detail.
  */
 export const KILO_SYSTEM_PROMPT_SUFFIX = `
 
 ## Kilo Delivery
 
-You are running through Talon's Kilo backend (a fork of OpenCode).
+Two ways to deliver a reply — pick whichever fits:
 
-Two ways to deliver a reply, pick whichever fits the message best:
+- **Plain text** — your assistant text is the reply. Just answer
+  normally. (Reasoning content stays private.)
+- **Delivery tools** — call \`end_turn(text="...", reply_to=N)\` for
+  threaded replies, \`send(type="text"|"photo"|"poll"|...)\` for rich
+  content, or \`react(emoji="...")\` for emoji acknowledgements. Use
+  these when you need reply targeting, buttons, attachments, or
+  multiple bubbles.
 
-1. **end_turn / send** (preferred) — call \`end_turn(text="...")\` for a
-   final reply, \`send(type="text", text="...")\` for mid-turn rich
-   messages (photos, polls, buttons), or \`react\` for one-shot emoji
-   acknowledgements. These give you reply-id targeting, button support,
-   and explicit "I am done" semantics.
-
-2. **Plain assistant text** — anything you write outside of a tool call
-   is delivered as a single Telegram message at end of turn. Use this for
-   quick conversational replies that don't need rich features.
-
-Pick one path per turn — the handler dedups identical text across both,
-but it's cleaner to commit to a single delivery route per reply.
+If you call a delivery tool, don't also repeat the same text in plain
+output — Talon dedupes but it's cleaner to commit to one route.
 `;
 
 // ── Backward-compat aliases ────────────────────────────────────────────────
@@ -146,6 +166,36 @@ export function initKiloAgent(
   config = cfg;
   if (getGatewayPort) gatewayPortFn = getGatewayPort;
   if (frontend) frontendName = frontend;
+
+  // Pre-warm plugin MCP servers in the background so the first chat
+  // message doesn't pay the ~12s subprocess-spawn cost. We don't pre-warm
+  // chat-namespaced servers (those depend on chatId, not known yet); the
+  // first turn for any chat still incurs ~800ms for that one server, but
+  // the dominant cost (16+ plugin servers in series) is amortised away.
+  // Errors are swallowed — pre-warm is best-effort, the per-turn ensure
+  // still runs and would log any real failures.
+  prewarmPluginMcpServers().catch((err) => {
+    logWarn("agent", `Plugin MCP pre-warm failed (non-fatal): ${errMsg(err)}`);
+  });
+}
+
+/**
+ * Background pre-warm of plugin MCP servers. Connects each
+ * plugin-provided MCP server to the Kilo HTTP server eagerly so the
+ * first turn doesn't spend 12+ seconds spawning subprocesses in
+ * series. Per-chat MCP servers can't be pre-warmed (they're
+ * chat-namespaced) but those are spawned once per process and cached.
+ */
+async function prewarmPluginMcpServers(): Promise<void> {
+  // Defer until the Kilo server is alive — `ensureServer()` will lazy-spawn
+  // it on the first call. We deliberately don't await here on the fast
+  // path; the catch in initKiloAgent handles any spawn failures.
+  const oc = await ensureServer();
+  // Use a sentinel chat id for the pre-warm so plugin MCP servers don't
+  // bind their bridge calls to a real chat — those calls would fail the
+  // gateway's active-context check anyway. Plugin tools that genuinely
+  // need a chat context get re-bound when a real chat starts.
+  await ensurePluginMcpServers(oc, "prewarm");
 }
 
 /** @deprecated Use {@link initKiloAgent} — kept for backward compatibility. */
@@ -161,6 +211,7 @@ export const initOpenCodeAgent = initKiloAgent;
 export function stopKiloServer(): void {
   clientPromise = null;
   modelProviderCache.clear();
+  registeredMcpServers.clear();
   clearModelCatalogCache();
   if (serverHandle) {
     serverHandle.close();
@@ -195,6 +246,7 @@ export async function ensureServer(): Promise<KiloClient> {
     }
 
     log("agent", "Starting Kilo server...");
+    const spawnStartedAt = Date.now();
 
     try {
       const server = await createKiloServer({
@@ -204,7 +256,10 @@ export async function ensureServer(): Promise<KiloClient> {
       });
       client = createStrictKiloClient(server.url);
       serverHandle = server;
-      log("agent", `Kilo server running at ${server.url}`);
+      log(
+        "agent",
+        `Kilo server running at ${server.url} (spawned in ${Date.now() - spawnStartedAt}ms)`,
+      );
     } catch (err) {
       const reusedClient = await reuseExistingServer();
       if (!reusedClient) throw err;
@@ -270,24 +325,57 @@ export async function ensureChatMcpServer(
 ): Promise<string> {
   const serverName = getChatMcpServerName(chatId);
 
-  try {
-    const statusResp = await oc.mcp.status();
-    const mcpServers =
-      (statusResp.data as Record<string, { status?: string }> | undefined) ??
-      {};
-    const talonTools = mcpServers[serverName];
-
-    if (talonTools?.status === "connected") {
-      return serverName;
+  // Disconnect any OTHER chat's MCP server first. Kilo exposes every
+  // registered MCP server's tools to every session — and per-session
+  // permission rules only block *execution*, not *visibility*. So if
+  // both `talon-tools-A` and `talon-tools-B` are connected, the model
+  // in chat A can still see `talon-tools-B_send` in its tool catalog
+  // and try to call it (observed in prod: model in group calling
+  // `talon-tools-352042062_react`, hitting either a deny or a
+  // wrong-chat bridge route). Holding only one chat-namespaced server
+  // connected at a time is the only way to actually hide cross-chat
+  // tools from the model. Plugin servers (extras-tools, github-tools,
+  // ...) and the heartbeat sentinel server stay connected; only chat
+  // servers get rotated out.
+  for (const other of [...registeredMcpServers]) {
+    if (
+      !other.startsWith(`${TALON_MCP_SERVER_NAME}-`) ||
+      other === serverName
+    ) {
+      continue;
     }
+    if (other === `${TALON_MCP_SERVER_NAME}-heartbeat`) continue;
+    try {
+      await oc.mcp.disconnect({ name: other });
+      registeredMcpServers.delete(other);
+      log("agent", `Disconnected ${other} MCP server (chat switch)`);
+    } catch (err) {
+      logWarn(
+        "agent",
+        `Failed to disconnect ${other} during chat switch: ${errMsg(err)}`,
+      );
+    }
+  }
 
+  // Local cache short-circuit. Kilo's GET /mcp returns {} regardless of
+  // actual state, so we trust our own record of what we registered
+  // earlier in this process — see the registeredMcpServers comment.
+  if (registeredMcpServers.has(serverName)) {
+    return serverName;
+  }
+
+  const startedAt = Date.now();
+  try {
     const toolsPath = new URL("../../core/tools/mcp-server.ts", import.meta.url)
       .pathname;
     await oc.mcp.add({
       name: serverName,
       config: {
         type: "local",
-        command: ["node", "--import", "tsx", toolsPath],
+        // Run the MCP server under Talon's launcher supervisor so the
+        // child dies cleanly when the SDK pipe closes OR Talon's bridge
+        // URL stops responding (catches the kilo-outlives-Talon case).
+        command: wrapMcpCommand(["node", "--import", "tsx", toolsPath]),
         environment: {
           TALON_BRIDGE_URL: `http://127.0.0.1:${gatewayPortFn()}`,
           TALON_CHAT_ID: chatId,
@@ -295,7 +383,13 @@ export async function ensureChatMcpServer(
         },
       },
     });
-    log("agent", `Registered ${serverName} MCP server with Kilo`);
+    registeredMcpServers.add(serverName);
+    const ms = Date.now() - startedAt;
+    log(
+      "agent",
+      `Registered ${serverName} MCP server with Kilo (${ms}ms)` +
+        (ms > SLOW_MCP_REGISTRATION_MS ? " [slow]" : ""),
+    );
   } catch (err) {
     logWarn(
       "agent",
@@ -326,33 +420,34 @@ export async function ensurePluginMcpServers(
   const pluginServers = getPluginMcpServers(bridgeUrl, chatId);
   const registered: string[] = [];
 
-  // Check which are already connected
-  let existingServers: Record<string, { status?: string }> = {};
-  try {
-    const statusResp = await oc.mcp.status();
-    existingServers =
-      (statusResp.data as Record<string, { status?: string }> | undefined) ??
-      {};
-  } catch {
-    // status check failed — try to register anyway
-  }
-
+  // Local cache short-circuit. Kilo's GET /mcp returns {} regardless of
+  // actual state, so the previous "ask the server what's connected"
+  // version always re-registered all 16 plugin servers per turn (~12s of
+  // wasted setup). We track our own registrations now and only POST when
+  // we haven't seen this server name before in this process.
   for (const [name, cfg] of Object.entries(pluginServers)) {
-    if (existingServers[name]?.status === "connected") {
+    if (registeredMcpServers.has(name)) {
       registered.push(name);
       continue;
     }
     try {
+      const startedAt = Date.now();
       await oc.mcp.add({
         name,
         config: {
           type: "local",
-          command: [cfg.command, ...cfg.args],
+          command: wrapMcpCommand([cfg.command, ...cfg.args]),
           environment: cfg.env ?? {},
         },
       });
       registered.push(name);
-      log("agent", `Registered plugin MCP server: ${name}`);
+      registeredMcpServers.add(name);
+      const ms = Date.now() - startedAt;
+      log(
+        "agent",
+        `Registered plugin MCP server: ${name} (${ms}ms)` +
+          (ms > SLOW_MCP_REGISTRATION_MS ? " [slow]" : ""),
+      );
     } catch (err) {
       logWarn(
         "agent",
@@ -419,6 +514,10 @@ export async function disconnectChatMcpServer(
 ): Promise<void> {
   try {
     await oc.mcp.disconnect({ name: serverName });
+    // Drop from the local cache so a future ensureChatMcpServer call
+    // re-registers (otherwise the cache would short-circuit and we'd
+    // happily skip a server Kilo no longer has).
+    registeredMcpServers.delete(serverName);
   } catch (err) {
     logWarn("agent", `Failed to disconnect ${serverName}: ${errMsg(err)}`);
   }
@@ -452,11 +551,51 @@ export async function ensureSession(
     }
   }
 
-  const resp = await oc.session.create({ title: `Chat ${chatId}` });
+  // Per-session permission rules. Two jobs:
+  //
+  //   1. Hide other chats' MCP tools from this session. Kilo exposes
+  //      every registered MCP server's tools to every session by default,
+  //      so a model in chat A would happily call
+  //      `talon-tools-<chatB>_send`. The bridge then routes to chat B,
+  //      which fails the gateway's active-context check and returns
+  //      "No active chat context". Or, in the cross-chat case where
+  //      chat B IS active, the model in chat A could leak content into
+  //      chat B. Deny pattern blocks both.
+  //
+  //   2. Auto-allow Kilo's built-in tools (read / bash / glob / ...) so
+  //      they don't sit in `permission.asked` waiting for a reply that
+  //      never arrives — Talon's question watchdog only handles
+  //      `question.*` events, not `permission.*`. Without an allow
+  //      rule the model's first `read` call hung the entire turn.
+  //
+  // Rules are evaluated in order; first match wins. (See Kilo's
+  // `PermissionRule` type — `permission` is the rule category, `pattern`
+  // is a glob.)
+  const ourServerName = getChatMcpServerName(chatId);
+  const permission: PermissionRule[] = [
+    { permission: "tool", pattern: `${ourServerName}_*`, action: "allow" },
+    {
+      permission: "tool",
+      pattern: `${TALON_MCP_SERVER_NAME}-*`,
+      action: "deny",
+    },
+    { permission: "tool", pattern: "*", action: "allow" },
+    { permission: "edit", pattern: "*", action: "allow" },
+    { permission: "bash", pattern: "*", action: "allow" },
+  ];
+
+  const resp = await oc.session.create({
+    title: `Chat ${chatId}`,
+    permission,
+  });
   const data = resp.data as Record<string, unknown> | undefined;
   const newId = (data?.id as string) ?? String(Date.now());
   setSessionId(chatId, newId);
-  log("agent", `[${chatId}] Created Kilo session: ${newId}`);
+  log(
+    "agent",
+    `[${chatId}] Created Kilo session: ${newId} (scoped to ${ourServerName}_*)`,
+  );
+
   return newId;
 }
 
@@ -535,18 +674,33 @@ export async function resolveProviderID(
  * Parse the stored model-selection string into a `{providerID?, modelID}` pair.
  *
  * Kilo model ids frequently contain `/` and `:` inside the model.id itself
- * (e.g. `inclusionai/ling-2.6-1t:free`). A naive `provider/model` splitter
- * mis-treats the `inclusionai/` prefix as the provider, so we always
- * return the whole string as the model id and let `resolveProviderID`
- * look up the real provider from the live catalog.
+ * (e.g. `inclusionai/ling-2.6-1t:free`, `deepseek/deepseek-v4-flash:free`).
+ * A naive `provider/model` splitter mis-treats those vendor prefixes as
+ * the provider, so we generally return the whole string as the model id
+ * and let `resolveProviderID` look up the real provider from the live
+ * catalog.
+ *
+ * Exception: if the value starts with the literal `kilo/` prefix
+ * (Talon's old hint that "this is a kilo-routed model"), strip it AND
+ * pin providerID to `"kilo"`. Otherwise the upstream Kilo router gets
+ * `kilo/deepseek/deepseek-v4-flash:free` as the model id and concats
+ * its own provider in front, producing
+ * `Model not found: opencode/kilo/deepseek/deepseek-v4-flash:free`.
  */
 export function parseStoredKiloModelSelection(value: string): {
   providerID?: string;
   modelID: string;
 } {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("kilo/")) {
+    return {
+      providerID: "kilo",
+      modelID: trimmed.slice("kilo/".length),
+    };
+  }
   return {
     providerID: undefined,
-    modelID: value.trim(),
+    modelID: trimmed,
   };
 }
 
@@ -557,6 +711,17 @@ export const parseStoredOpenCodeModelSelection = parseStoredKiloModelSelection;
 
 export function getConfig(): TalonConfig {
   return config;
+}
+
+/**
+ * Snapshot of the locally-cached MCP server registrations. Test-only:
+ * the `registeredMcpServers` Set is module-private state that integration
+ * tests need to inspect to assert chat-switch isolation actually fired
+ * (Kilo's GET /mcp returns {} regardless of state, so we can't query the
+ * server itself). Don't rely on this in production code.
+ */
+export function getRegisteredMcpServerNames(): string[] {
+  return [...registeredMcpServers];
 }
 
 export function getGatewayPortFn(): () => number {

@@ -150,24 +150,24 @@ describe("openai-agents / listModels", () => {
 });
 
 describe("openai-agents / custom endpoint (openaiBaseUrl) passthrough", () => {
-  const origEnvBase = process.env.OPENAI_BASE_URL;
-  const origEnvKey = process.env.OPENAI_API_KEY;
-  const origEnvMode = process.env.OPENAI_API_MODE;
+  const origTalonBase = process.env.TALON_AGENTS_URL;
+  const origTalonKey = process.env.TALON_AGENTS_KEY;
+  const origTalonMode = process.env.TALON_AGENTS_API_MODE;
 
   afterEach(() => {
     resetState();
-    if (origEnvBase === undefined) delete process.env.OPENAI_BASE_URL;
-    else process.env.OPENAI_BASE_URL = origEnvBase;
-    if (origEnvKey === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = origEnvKey;
-    if (origEnvMode === undefined) delete process.env.OPENAI_API_MODE;
-    else process.env.OPENAI_API_MODE = origEnvMode;
+    if (origTalonBase === undefined) delete process.env.TALON_AGENTS_URL;
+    else process.env.TALON_AGENTS_URL = origTalonBase;
+    if (origTalonKey === undefined) delete process.env.TALON_AGENTS_KEY;
+    else process.env.TALON_AGENTS_KEY = origTalonKey;
+    if (origTalonMode === undefined) delete process.env.TALON_AGENTS_API_MODE;
+    else process.env.TALON_AGENTS_API_MODE = origTalonMode;
   });
 
   function initWithBase(baseURL?: string, apiKey = "test-key") {
-    delete process.env.OPENAI_BASE_URL;
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.OPENAI_API_MODE;
+    delete process.env.TALON_AGENTS_URL;
+    delete process.env.TALON_AGENTS_KEY;
+    delete process.env.TALON_AGENTS_API_MODE;
     initOpenAIAgentsAgent(
       {
         model: "gpt-5.5",
@@ -189,9 +189,9 @@ describe("openai-agents / custom endpoint (openaiBaseUrl) passthrough", () => {
     expect(getOpenAIBaseUrl()).toBeUndefined();
   });
 
-  it("env OPENAI_BASE_URL overrides config", () => {
+  it("TALON_AGENTS_URL env overrides config", () => {
     initWithBase("https://config.example.com/v1");
-    process.env.OPENAI_BASE_URL = "https://env.example.com/v1";
+    process.env.TALON_AGENTS_URL = "https://env.example.com/v1";
     expect(getOpenAIBaseUrl()).toBe("https://env.example.com/v1");
   });
 

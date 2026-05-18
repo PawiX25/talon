@@ -1,15 +1,15 @@
 /**
- * OpenAI Agents backend — model catalog tests.
+ * Tests for the OpenAI Agents backend's model surface.
  *
- * The Agents SDK accepts any string the OpenAI Responses API accepts,
- * but Talon ships a hand-maintained catalog for the model picker UI.
- * These tests pin the catalog shape + the standard `resolveModel` /
- * `formatModelError` / `listModels` behaviour.
+ * The backend has no hardcoded catalog — everything is driven by
+ * `state.endpointModels`, which `init.ts#fetchEndpointModels`
+ * populates from the active endpoint's `/models` response. These
+ * tests seed that map directly instead of going through a live
+ * fetch, so behavior of the resolver, picker, and listing is
+ * verified deterministically.
  */
-
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
-  OPENAI_AGENTS_MODELS,
   resolveModel,
   getModelInfo,
   getSettingsPresentation,
@@ -20,136 +20,421 @@ import {
 } from "../backend/openai-agents/models.js";
 import {
   initOpenAIAgentsAgent,
+  getOpenAIApiKey,
   getOpenAIBaseUrl,
 } from "../backend/openai-agents/init.js";
-import { resetState } from "../backend/openai-agents/state.js";
+import {
+  getState,
+  resetState,
+  type EndpointModelCapabilities,
+} from "../backend/openai-agents/state.js";
 
-describe("openai-agents / model catalog", () => {
-  it("exposes at least the gpt-5.5 flagship", () => {
-    expect(OPENAI_AGENTS_MODELS.find((m) => m.id === "gpt-5.5")).toBeDefined();
-  });
+function seedCatalog(
+  entries: Array<[string, EndpointModelCapabilities | undefined]>,
+): void {
+  const map = getState().endpointModels;
+  map.clear();
+  for (const [id, caps] of entries) {
+    map.set(id, caps ?? {});
+  }
+}
 
-  it("every model carries the openai provider", () => {
-    for (const m of OPENAI_AGENTS_MODELS) {
-      expect(m.provider).toBe("openai");
-      expect(m.providerName).toBe("OpenAI");
-      expect(m.selectable).toBe(true);
-    }
-  });
+beforeEach(() => resetState());
+afterEach(() => resetState());
 
-  it("does NOT include gpt-5-codex (Codex CLI only)", () => {
-    expect(
-      OPENAI_AGENTS_MODELS.find((m) => m.id === "gpt-5-codex"),
-    ).toBeUndefined();
-  });
-});
+// ── resolveModel ────────────────────────────────────────────────────────────
 
 describe("openai-agents / resolveModel", () => {
-  it("returns exact match for a known model id", () => {
+  it("returns missing for an empty query", () => {
+    expect(resolveModel("").kind).toBe("missing");
+    expect(resolveModel("   ").kind).toBe("missing");
+  });
+
+  it("exact-matches an advertised id and surfaces its metadata", () => {
+    seedCatalog([
+      ["gpt-5.5", { contextWindow: 400_000, displayName: "GPT-5.5" }],
+    ]);
     const r = resolveModel("gpt-5.5");
     expect(r.kind).toBe("exact");
     if (r.kind !== "exact") return;
     expect(r.model.id).toBe("gpt-5.5");
+    expect(r.model.contextWindow).toBe(400_000);
+    expect(r.model.displayName).toBe("GPT-5.5");
+    expect(r.storedValue).toBe("gpt-5.5");
   });
 
-  it("returns missing for an empty query", () => {
-    expect(resolveModel("").kind).toBe("missing");
+  it("prefix-matches by id when unambiguous", () => {
+    seedCatalog([
+      ["gpt-5-mini", { contextWindow: 200_000 }],
+      ["o4-mini", { contextWindow: 128_000 }],
+    ]);
+    const r = resolveModel("gpt");
+    expect(r.kind).toBe("exact");
+    if (r.kind !== "exact") return;
+    expect(r.model.id).toBe("gpt-5-mini");
   });
 
-  it("returns missing for an unrecognised query", () => {
-    expect(resolveModel("totally-not-a-model").kind).toBe("missing");
-  });
-
-  it("returns ambiguous for a prefix that matches multiple", () => {
+  it("returns ambiguous when more than one entry shares a prefix and none is an exact match", () => {
+    seedCatalog([
+      ["gpt-5.5", {}],
+      ["gpt-5-mini", {}],
+    ]);
+    // "gpt-5" is a strict prefix of both ids but isn't an id itself,
+    // so the resolver can't disambiguate.
     const r = resolveModel("gpt-5");
-    // `gpt-5`, `gpt-5.5`, and `gpt-5-mini` all share the `gpt-5` prefix.
-    expect(["exact", "ambiguous"]).toContain(r.kind);
-    // `gpt-5` itself IS an exact id, so prefix match prefers the exact one.
-    // The handler-facing contract is that an unambiguous user query like
-    // `gpt-5` resolves cleanly to the exact id; we still want SOME match.
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind !== "ambiguous") return;
+    expect(r.matches.map((m) => m.id).sort()).toEqual([
+      "gpt-5-mini",
+      "gpt-5.5",
+    ]);
+  });
+
+  it("prefers exact id match even when there are longer-id prefix candidates", () => {
+    seedCatalog([
+      ["gpt-5", {}],
+      ["gpt-5.5", {}],
+      ["gpt-5-mini", {}],
+    ]);
+    // "gpt-5" is exact for the first entry; the resolver short-circuits
+    // and doesn't go through the prefix ambiguity path.
+    const r = resolveModel("gpt-5");
+    expect(r.kind).toBe("exact");
+    if (r.kind !== "exact") return;
+    expect(r.model.id).toBe("gpt-5");
+  });
+
+  it("passes through unknown ids as bare passthrough models", () => {
+    seedCatalog([]);
+    const r = resolveModel("brand-new/release-2030");
+    expect(r.kind).toBe("exact");
+    if (r.kind !== "exact") return;
+    expect(r.model.id).toBe("brand-new/release-2030");
+    expect(r.model.displayName).toBe("brand-new/release-2030");
+    expect(r.model.contextWindow).toBeUndefined();
+    expect(r.model.provider).toBe("openai-compatible");
+  });
+
+  it("prefix-matches by display name when present", () => {
+    seedCatalog([
+      ["abc/owl-alpha", { displayName: "Owl Alpha", contextWindow: 1_000_000 }],
+    ]);
+    const r = resolveModel("owl");
+    expect(r.kind).toBe("exact");
+    if (r.kind !== "exact") return;
+    expect(r.model.id).toBe("abc/owl-alpha");
   });
 });
+
+// ── getModelInfo ────────────────────────────────────────────────────────────
 
 describe("openai-agents / getModelInfo", () => {
-  it("returns the model for a known id", () => {
-    expect(getModelInfo("gpt-5.5")?.id).toBe("gpt-5.5");
+  it("returns enriched info for a known id", () => {
+    seedCatalog([
+      ["gpt-5.5", { contextWindow: 400_000, displayName: "GPT-5.5" }],
+    ]);
+    const info = getModelInfo("gpt-5.5");
+    expect(info?.contextWindow).toBe(400_000);
+    expect(info?.displayName).toBe("GPT-5.5");
   });
 
-  it("returns undefined for unknown ids", () => {
-    expect(getModelInfo("missing-model")).toBeUndefined();
+  it("returns a bare passthrough for an unknown id (never undefined for non-empty)", () => {
+    seedCatalog([]);
+    const info = getModelInfo("unknown/model");
+    expect(info).toBeDefined();
+    expect(info?.id).toBe("unknown/model");
+    expect(info?.contextWindow).toBeUndefined();
+    expect(info?.free).toBeUndefined();
+  });
+
+  it("returns undefined for the empty string", () => {
+    expect(getModelInfo("")).toBeUndefined();
   });
 });
 
-describe("openai-agents / getSettingsPresentation", () => {
-  it("returns one button per model with active marker on the current one", () => {
-    const pres = getSettingsPresentation("gpt-5");
-    expect(pres.modelButtons.length).toBe(OPENAI_AGENTS_MODELS.length);
-    const activeButton = pres.modelButtons.find((b) =>
-      b.callback_data.endsWith("gpt-5"),
+// ── /settings presentation ──────────────────────────────────────────────────
+
+describe("openai-agents / getSettingsPresentation — small catalog (flat view)", () => {
+  it('returns view="models" with the active model bullet-marked', () => {
+    seedCatalog([
+      ["gpt-5.5", { displayName: "GPT-5.5", contextWindow: 400_000 }],
+      ["gpt-5", { displayName: "GPT-5", contextWindow: 400_000 }],
+    ]);
+    const pres = getSettingsPresentation("gpt-5.5");
+    expect(pres.view).toBe("models");
+    const activeBtn = pres.modelButtons.find((b) =>
+      b.callback_data.endsWith("gpt-5.5"),
     );
-    expect(activeButton?.text.startsWith("● ")).toBe(true);
+    expect(activeBtn?.text.startsWith("● ")).toBe(true);
+    expect(activeBtn?.callback_data).toBe("settings:model:gpt-5.5");
   });
 
-  it("uses the supplied callbackPrefix", () => {
-    const pres = getSettingsPresentation("gpt-5.5", "model:");
-    expect(pres.modelButtons[0].callback_data.startsWith("model:")).toBe(true);
+  it("paginates correctly", () => {
+    const entries: Array<[string, EndpointModelCapabilities]> = [];
+    for (let i = 0; i < 25; i++)
+      entries.push([`m${String(i).padStart(2, "0")}`, {}]);
+    seedCatalog(entries);
+    const page1 = getSettingsPresentation("m00", { pageSize: 8 });
+    const page2 = getSettingsPresentation("m00", { pageSize: 8, page: 2 });
+    expect(page1.view).toBe("models");
+    expect(page1.page).toBe(1);
+    expect(page2.page).toBe(2);
+    expect(page1.modelButtons).not.toEqual(page2.modelButtons);
+    expect(page1.totalPages).toBe(Math.ceil(25 / 8));
+  });
+
+  it("clamps page > totalPages to the last page", () => {
+    const entries: Array<[string, EndpointModelCapabilities]> = [];
+    for (let i = 0; i < 12; i++) entries.push([`m${i}`, {}]);
+    seedCatalog(entries);
+    const pres = getSettingsPresentation("m0", { pageSize: 4, page: 999 });
+    expect(pres.page).toBe(3);
+    expect(pres.totalPages).toBe(3);
+  });
+
+  it("applies the free filter and reports freeCount as a hint", () => {
+    seedCatalog([
+      ["paid-a", {}],
+      ["paid-b", {}],
+      ["free-a", { free: true }],
+      ["free-b", { free: true }],
+    ]);
+    const all = getSettingsPresentation("(none)");
+    expect(all.freeCount).toBe(2);
+    expect(all.totalCount).toBe(4);
+    const free = getSettingsPresentation("(none)", { filter: "free" });
+    expect(free.filter).toBe("free");
+    expect(free.modelButtons).toHaveLength(2);
+    for (const b of free.modelButtons) {
+      expect(b.callback_data).toMatch(/free-/);
+    }
+  });
+
+  it("modelDetails carries plain-text backend status (no markup)", () => {
+    seedCatalog([["m1", { contextWindow: 128_000, free: true }]]);
+    const pres = getSettingsPresentation("m1");
+    for (const line of pres.modelDetails) {
+      expect(line).not.toContain("<b>");
+      expect(line).not.toContain("**");
+      expect(line).not.toContain("`");
+    }
+    expect(pres.modelDetails.some((l) => /discovered/.test(l))).toBe(true);
+  });
+
+  it("button labels strip vendor prefix and surface ctx + free flag", () => {
+    seedCatalog([
+      ["openrouter/owl-alpha", { contextWindow: 1_000_000, free: true }],
+    ]);
+    const pres = getSettingsPresentation("(none)");
+    const btn = pres.modelButtons[0];
+    expect(btn.text).toContain("owl-alpha");
+    expect(btn.text).not.toContain("openrouter/");
+    expect(btn.text).toMatch(/1M/);
+    expect(btn.text).toContain("🆓");
+  });
+
+  it("hides models whose `<prefix><id>` would overflow Telegram's 64-byte callback_data limit", () => {
+    // 61-char id + `model:` (6) = 67 bytes — over Telegram's limit.
+    // OpenRouter ships exactly one such id today
+    // (`cognitivecomputations/dolphin-mistral-24b-venice-edition:free`),
+    // which crashed BUTTON_DATA_INVALID before this guard.
+    const overflow = "a".repeat(61);
+    const ok = "short-id";
+    seedCatalog([
+      [overflow, { contextWindow: 8192 }],
+      [ok, { contextWindow: 8192 }],
+    ]);
+    const pres = getSettingsPresentation("(none)", {
+      callbackPrefix: "model:",
+    });
+    for (const b of pres.modelButtons) {
+      expect(Buffer.byteLength(b.callback_data, "utf8")).toBeLessThanOrEqual(
+        64,
+      );
+    }
+    expect(pres.modelButtons.some((b) => b.callback_data.endsWith(ok))).toBe(
+      true,
+    );
+    expect(
+      pres.modelButtons.some((b) => b.callback_data.includes(overflow)),
+    ).toBe(false);
+    // The totalCount reflects what's *renderable*, not the raw catalog,
+    // so /status and the menu status line don't lie about visibility.
+    expect(pres.totalCount).toBe(1);
   });
 });
 
-describe("openai-agents / getProviders + getProviderModels", () => {
-  it("returns OpenAI as the sole provider", () => {
+describe("openai-agents / getSettingsPresentation — large catalog (provider groups)", () => {
+  function seedLarge(): void {
+    // Build a 60-model catalog spread across 4 providers — well over
+    // the 30-model PROVIDER_GROUP_THRESHOLD.
+    const entries: Array<[string, EndpointModelCapabilities]> = [];
+    for (let i = 0; i < 20; i++)
+      entries.push([`anthropic/m${i}`, { contextWindow: 200_000 }]);
+    for (let i = 0; i < 15; i++)
+      entries.push([`openai/m${i}`, { contextWindow: 400_000 }]);
+    for (let i = 0; i < 15; i++)
+      entries.push([`google/m${i}`, { contextWindow: 1_000_000 }]);
+    for (let i = 0; i < 10; i++)
+      entries.push([`mistralai/m${i}`, { contextWindow: 64_000 }]);
+    seedCatalog(entries);
+  }
+
+  it('returns view="groups" with provider chips when no provider is selected', () => {
+    seedLarge();
+    const pres = getSettingsPresentation("(none)");
+    expect(pres.view).toBe("groups");
+    expect(pres.modelButtons.length).toBe(4); // anthropic / openai / google / mistralai
+    expect(pres.modelButtons[0].text).toMatch(/\((\d+)\)/);
+  });
+
+  it("provider buttons carry a `:provider:` drill callback under the default navPrefix", () => {
+    seedLarge();
+    const pres = getSettingsPresentation("(none)");
+    for (const b of pres.modelButtons) {
+      expect(b.callback_data).toMatch(/^settings:models:provider:/);
+    }
+  });
+
+  it("honors an explicit navCallbackPrefix", () => {
+    seedLarge();
+    const pres = getSettingsPresentation("(none)", {
+      callbackPrefix: "model:",
+      navCallbackPrefix: "model:nav",
+    });
+    for (const b of pres.modelButtons) {
+      expect(b.callback_data).toMatch(/^model:nav:provider:/);
+    }
+  });
+
+  it("drills into a provider via options.provider", () => {
+    seedLarge();
+    const pres = getSettingsPresentation("(none)", { provider: "google" });
+    expect(pres.view).toBe("models");
+    expect(pres.provider).toBe("google");
+    for (const b of pres.modelButtons) {
+      expect(b.callback_data).toMatch(/settings:model:google\//);
+    }
+  });
+
+  it("skips the group view when the filtered catalog is small (free filter)", () => {
+    // Only one free model — under the threshold even before grouping.
+    const entries: Array<[string, EndpointModelCapabilities]> = [];
+    for (let i = 0; i < 40; i++)
+      entries.push([`p/m${i}`, { contextWindow: 100_000 }]);
+    entries.push(["free/only", { free: true, contextWindow: 50_000 }]);
+    seedCatalog(entries);
+    const pres = getSettingsPresentation("(none)", { filter: "free" });
+    expect(pres.view).toBe("models");
+    expect(pres.modelButtons).toHaveLength(1);
+  });
+});
+
+// ── providers ──────────────────────────────────────────────────────────────
+
+describe("openai-agents / providers", () => {
+  it("exposes a single endpoint-agnostic provider", () => {
+    seedCatalog([
+      ["m1", {}],
+      ["m2", {}],
+    ]);
     const providers = getProviders();
-    expect(providers.length).toBe(1);
+    expect(providers).toHaveLength(1);
     expect(providers[0].id).toBe("openai");
-    expect(providers[0].connected).toBe(true);
-    expect(providers[0].modelCount).toBe(OPENAI_AGENTS_MODELS.length);
+    expect(providers[0].modelCount).toBe(2);
   });
 
-  it("returns paginated models for openai provider", () => {
-    const page1 = getProviderModels("openai", 1, 2);
-    expect(page1.models.length).toBe(2);
-    expect(page1.total).toBe(OPENAI_AGENTS_MODELS.length);
+  it("paginates getProviderModels()", () => {
+    const entries: Array<[string, EndpointModelCapabilities]> = [];
+    for (let i = 0; i < 60; i++)
+      entries.push([`m${String(i).padStart(2, "0")}`, {}]);
+    seedCatalog(entries);
+    const page1 = getProviderModels("openai", 1, 50);
+    expect(page1.models.length).toBe(50);
+    expect(page1.total).toBe(60);
+    const page2 = getProviderModels("openai", 2, 50);
+    expect(page2.models.length).toBe(10);
   });
 
-  it("returns empty for unknown provider", () => {
-    expect(getProviderModels("anthropic").models).toEqual([]);
+  it("returns nothing for unknown providers", () => {
+    seedCatalog([["m", {}]]);
+    expect(getProviderModels("bogus").models).toEqual([]);
   });
 });
+
+// ── formatModelError ───────────────────────────────────────────────────────
 
 describe("openai-agents / formatModelError", () => {
-  it("describes ambiguous matches with backtick-quoted ids", () => {
-    const msg = formatModelError("g", {
+  it("lists the candidates on ambiguity", () => {
+    seedCatalog([
+      ["gpt-5", {}],
+      ["gpt-5.5", {}],
+    ]);
+    const msg = formatModelError("gpt-5", {
       kind: "ambiguous",
-      matches: OPENAI_AGENTS_MODELS.slice(0, 2),
+      matches: [
+        {
+          id: "gpt-5",
+          displayName: "x",
+          provider: "x",
+          providerName: "x",
+          selectable: true,
+          reasoning: false,
+        },
+        {
+          id: "gpt-5.5",
+          displayName: "x",
+          provider: "x",
+          providerName: "x",
+          selectable: true,
+          reasoning: false,
+        },
+      ],
     });
-    expect(msg).toContain("Multiple");
-    expect(msg).toContain("`");
+    expect(msg).toContain("gpt-5");
+    expect(msg).toContain("gpt-5.5");
+    expect(msg).toContain("Pick one");
   });
 
-  it("describes a missing query with the full catalog", () => {
-    const msg = formatModelError("nope", { kind: "missing" });
-    expect(msg).toContain("No OpenAI Agents model matches");
-    expect(msg).toContain("gpt-5.5");
+  it("returns the empty-query hint for `missing`", () => {
+    const msg = formatModelError("", { kind: "missing" });
+    expect(msg.toLowerCase()).toContain("no model id");
   });
 });
+
+// ── listModels filter ──────────────────────────────────────────────────────
 
 describe("openai-agents / listModels", () => {
-  it("returns all by default", () => {
-    const r = listModels();
-    expect(r.models.length).toBe(OPENAI_AGENTS_MODELS.length);
-    expect(r.total).toBe(OPENAI_AGENTS_MODELS.length);
+  it("returns the full catalog by default", () => {
+    seedCatalog([
+      ["m1", { free: true }],
+      ["m2", {}],
+      ["m3", { free: true }],
+    ]);
+    expect(listModels().models.length).toBe(3);
+    expect(listModels("all").models.length).toBe(3);
   });
 
-  it("returns nothing for `free` filter — no free OpenAI Agents models", () => {
+  it("returns only free-flagged models for the `free` filter", () => {
+    seedCatalog([
+      ["m-paid", {}],
+      ["m-free", { free: true }],
+    ]);
+    const free = listModels("free");
+    expect(free.models).toHaveLength(1);
+    expect(free.models[0].id).toBe("m-free");
+    expect(free.models[0].free).toBe(true);
+  });
+
+  it("returns an empty list when no entries are flagged free", () => {
+    seedCatalog([["m", {}]]);
     expect(listModels("free").models).toEqual([]);
-  });
-
-  it("returns all for the `all` filter", () => {
-    expect(listModels("all").models.length).toBe(OPENAI_AGENTS_MODELS.length);
   });
 });
 
-describe("openai-agents / custom endpoint (openaiBaseUrl) passthrough", () => {
+// ── env-var resolution ─────────────────────────────────────────────────────
+
+describe("openai-agents / env-var resolution", () => {
   const origTalonBase = process.env.TALON_AGENTS_URL;
   const origTalonKey = process.env.TALON_AGENTS_KEY;
   const origTalonMode = process.env.TALON_AGENTS_API_MODE;
@@ -164,73 +449,40 @@ describe("openai-agents / custom endpoint (openaiBaseUrl) passthrough", () => {
     else process.env.TALON_AGENTS_API_MODE = origTalonMode;
   });
 
-  function initWithBase(baseURL?: string, apiKey = "test-key") {
+  function init(cfg: { apiKey?: string; baseURL?: string }): void {
     delete process.env.TALON_AGENTS_URL;
     delete process.env.TALON_AGENTS_KEY;
     delete process.env.TALON_AGENTS_API_MODE;
     initOpenAIAgentsAgent(
       {
         model: "gpt-5.5",
-        openaiApiKey: apiKey,
-        ...(baseURL ? { openaiBaseUrl: baseURL } : {}),
+        ...(cfg.apiKey ? { openaiApiKey: cfg.apiKey } : {}),
+        ...(cfg.baseURL ? { openaiBaseUrl: cfg.baseURL } : {}),
       } as never,
       () => 12345,
       "telegram",
     );
   }
 
-  it("getOpenAIBaseUrl returns the configured baseURL", () => {
-    initWithBase("https://openrouter.ai/api/v1");
+  it("returns the configured baseURL", () => {
+    init({ apiKey: "k", baseURL: "https://openrouter.ai/api/v1" });
     expect(getOpenAIBaseUrl()).toBe("https://openrouter.ai/api/v1");
   });
 
-  it("getOpenAIBaseUrl returns undefined when no baseURL is set", () => {
-    initWithBase(undefined);
+  it("returns undefined when no baseURL is configured", () => {
+    init({ apiKey: "k" });
     expect(getOpenAIBaseUrl()).toBeUndefined();
   });
 
   it("TALON_AGENTS_URL env overrides config", () => {
-    initWithBase("https://config.example.com/v1");
+    init({ apiKey: "k", baseURL: "https://config.example.com/v1" });
     process.env.TALON_AGENTS_URL = "https://env.example.com/v1";
     expect(getOpenAIBaseUrl()).toBe("https://env.example.com/v1");
   });
 
-  it("resolveModel passes through unknown ids when a custom baseURL is set", () => {
-    initWithBase("https://openrouter.ai/api/v1");
-    const r = resolveModel("meta-llama/llama-3.3-70b-instruct");
-    expect(r.kind).toBe("exact");
-    if (r.kind !== "exact") return;
-    expect(r.model.id).toBe("meta-llama/llama-3.3-70b-instruct");
-    expect(r.model.provider).toBe("openai-compatible");
-  });
-
-  it("resolveModel still returns missing for unknown ids when no baseURL is set", () => {
-    initWithBase(undefined);
-    expect(resolveModel("meta-llama/llama-3.3-70b-instruct").kind).toBe(
-      "missing",
-    );
-  });
-
-  it("resolveModel still prefers exact catalog hits when a baseURL is set", () => {
-    initWithBase("https://openrouter.ai/api/v1");
-    const r = resolveModel("gpt-5.5");
-    expect(r.kind).toBe("exact");
-    if (r.kind !== "exact") return;
-    expect(r.model.id).toBe("gpt-5.5");
-    expect(r.model.provider).toBe("openai");
-  });
-
-  it("getModelInfo returns a synthetic entry for arbitrary ids when baseURL is set", () => {
-    initWithBase("https://openrouter.ai/api/v1");
-    const info = getModelInfo("qwen/qwen3-coder");
-    expect(info?.id).toBe("qwen/qwen3-coder");
-    expect(info?.displayName).toBe("qwen/qwen3-coder");
-  });
-
-  it("formatModelError points to direct-config when baseURL is set", () => {
-    initWithBase("https://openrouter.ai/api/v1");
-    const msg = formatModelError("typo-model", { kind: "missing" });
-    expect(msg).toContain("openaiBaseUrl");
-    expect(msg).toContain("talon.json");
+  it("TALON_AGENTS_KEY env overrides config", () => {
+    init({ apiKey: "config-key" });
+    process.env.TALON_AGENTS_KEY = "env-key";
+    expect(getOpenAIApiKey()).toBe("env-key");
   });
 });

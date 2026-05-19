@@ -8,7 +8,20 @@
 
 import "./factory.js";
 
-export { initOpenAIAgentsAgent, getOpenAIApiKey } from "./init.js";
+export {
+  initOpenAIAgentsAgent,
+  getOpenAIApiKey,
+  getOpenAIBaseUrl,
+  triggerDiscoveryRefresh,
+} from "./init.js";
+export {
+  awaitDiscovery,
+  startDiscovery,
+  refreshDiscovery,
+  hasDiscoveredCatalog,
+  fetchEndpointModels,
+  extractCapabilities,
+} from "./discovery.js";
 export { handleMessage, getActiveAbort } from "./handler.js";
 export { resetState, getState } from "./state.js";
 export {
@@ -26,5 +39,10 @@ export {
   OPENAI_AGENTS_MAX_TURNS,
   OPENAI_AGENTS_AGENT_NAME,
 } from "./constants.js";
-export { buildOpenAIAgentsMcpServers } from "./mcp.js";
-export type { OpenAIAgentsMcpBundle } from "./mcp.js";
+export {
+  getOrCreateBundle,
+  releaseBundle,
+  releaseAllBundles,
+  getActiveBundleIds,
+} from "./mcp-pool.js";
+export type { OpenAIAgentsMcpBundle, BundleInputs } from "./mcp-pool.js";

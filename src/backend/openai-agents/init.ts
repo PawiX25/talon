@@ -2,10 +2,12 @@
  * OpenAI Agents backend initialisation.
  *
  * No long-running server, no per-chat instance cache — the SDK is
- * stateless from Talon's side. We only capture config + frontend +
- * gateway-port resolver at init, plus surface an auth-mode log line
- * so operators know whether `OPENAI_API_KEY` (or a custom-endpoint
- * configuration) actually resolves.
+ * stateless from Talon's side. We capture config + frontend +
+ * gateway-port resolver at init, wire the SDK's default OpenAI client
+ * at the resolved endpoint, surface an auth-mode log line so operators
+ * know whether `TALON_AGENTS_KEY` (or a custom-endpoint configuration)
+ * actually resolves, then kick off endpoint discovery asynchronously
+ * (see `discovery.ts`).
  *
  * Endpoint selection
  * ──────────────────
@@ -43,15 +45,17 @@ import OpenAI from "openai";
 import { setDefaultOpenAIClient, setOpenAIAPI } from "@openai/agents";
 import type { TalonConfig } from "../../util/config.js";
 import type { FrontendName } from "../registry.js";
-import { log, logWarn, logDebug } from "../../util/log.js";
-import { getState, type EndpointModelCapabilities } from "./state.js";
+import { log, logWarn } from "../../util/log.js";
+import { getState } from "./state.js";
+import { startDiscovery, refreshDiscovery } from "./discovery.js";
 
 /**
  * Initialise the OpenAI Agents backend.
  *
- * Records config + frontend, then wires the SDK's default client and
- * API surface based on resolved endpoint/key/mode. No turns fire here;
- * the actual agent loop runs in `handler.ts`.
+ * Records config + frontend, wires the SDK's default client and API
+ * surface based on resolved endpoint/key/mode, then kicks off model
+ * discovery in the background. No turns fire here; the actual agent
+ * loop runs in `handler.ts`.
  */
 export function initOpenAIAgentsAgent(
   cfg: TalonConfig,
@@ -153,6 +157,12 @@ export function initOpenAIAgentsAgent(
     );
   }
 
+  // Cache the resolved endpoint on state so discovery can be retried
+  // via `triggerDiscoveryRefresh()` without re-reading config.
+  const effectiveBaseURL = baseURL ?? "https://api.openai.com/v1";
+  state.baseURL = effectiveBaseURL;
+  state.apiKey = apiKey;
+
   // Fire-and-forget: populate the in-memory model catalog from
   // whatever the active endpoint advertises via `GET /models`. The
   // backend is fully provider-agnostic — there's no hardcoded model
@@ -162,128 +172,28 @@ export function initOpenAIAgentsAgent(
   // us list discovered ids. Operators can still target any model id
   // their endpoint accepts even if /models doesn't mention it —
   // unknown ids fall through to a bare passthrough.
-  const effectiveBaseURL = baseURL ?? "https://api.openai.com/v1";
-  fetchEndpointModels(effectiveBaseURL, apiKey).catch((err) => {
-    logDebug(
-      "agent",
-      `Endpoint model enrichment skipped: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  });
-}
-
-// ── Endpoint model enrichment ───────────────────────────────────────────────
-
-interface EndpointModelEntry {
-  id?: string;
-  /** OpenRouter + most providers — human display name. */
-  name?: string;
-  /** Gemini's OpenAI-compatible endpoint uses this instead of `name`. */
-  display_name?: string;
-  context_length?: number;
-  top_provider?: { context_length?: number };
-  pricing?: { prompt?: string | number; completion?: string | number };
+  //
+  // The picker awaits this promise with a short timeout on first
+  // render so the user doesn't see "0 models" just because the HTTP
+  // call hasn't returned yet — see `discovery.ts#awaitDiscovery`.
+  void startDiscovery(effectiveBaseURL, apiKey);
 }
 
 /**
- * Normalise the id Talon stores + sends back to the endpoint.
+ * Trigger a fresh discovery fetch using the resolved endpoint stored
+ * on state at init time. Returns the new promise so callers can await
+ * if they want; safe to fire-and-forget.
  *
- * Gemini's OpenAI-compatible `/models` returns ids like
- * `models/gemini-2.5-flash`, but the chat-completions route accepts
- * either form. Stripping the `models/` prefix:
- *
- *   1. Keeps the picker label clean (`gemini-2.5-flash`, not
- *      `models/gemini-2.5-flash`).
- *   2. Lets the flat-id provider-inference table in `models.ts` match
- *      the `gemini-` prefix and bucket the entry under Google,
- *      instead of treating "models" as a provider name from the
- *      slash split.
- *
- * Other endpoints aren't affected — the prefix only appears on
- * Gemini.
+ * Useful when the operator wants to refresh the catalog without
+ * restarting Talon — e.g. after an endpoint outage clears or a new
+ * model is published.
  */
-function normaliseModelId(id: string): string {
-  return id.startsWith("models/") ? id.slice("models/".length) : id;
-}
-
-/**
- * Query the OpenAI-compatible `/models` endpoint and stash the
- * advertised model metadata (context window, display name, free
- * flag) into `state.endpointModels`. Called once at backend init.
- *
- * Designed to be tolerant: the spec is loose enough that endpoints
- * shape responses differently (OpenRouter has `top_provider.context_length`
- * and `pricing.prompt`, vLLM has just `context_length`, Ollama has
- * neither). We grab whatever's present and ignore the rest.
- */
-export async function fetchEndpointModels(
-  baseURL: string,
-  apiKey: string | undefined,
-): Promise<void> {
-  const url = baseURL.replace(/\/+$/, "") + "/models";
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-  };
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
-  let res: Response;
-  try {
-    res = await fetch(url, { headers, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!res.ok) {
-    throw new Error(`/models returned ${res.status}`);
-  }
-  const json = (await res.json()) as { data?: EndpointModelEntry[] };
-  const data = Array.isArray(json?.data) ? json.data : [];
-
+export function triggerDiscoveryRefresh(): Promise<void> {
   const state = getState();
-  let discovered = 0;
-  let enriched = 0;
-  for (const entry of data) {
-    if (!entry || typeof entry.id !== "string") continue;
-    const id = normaliseModelId(entry.id);
-    const caps: EndpointModelCapabilities = {};
-    const ctx =
-      typeof entry.context_length === "number"
-        ? entry.context_length
-        : typeof entry.top_provider?.context_length === "number"
-          ? entry.top_provider.context_length
-          : undefined;
-    if (ctx && ctx > 0) caps.contextWindow = ctx;
-    // `name` (OpenRouter, others) and `display_name` (Gemini) both
-    // mean the human label. Prefer `name` when both are present; fall
-    // back to `display_name` so Gemini gets nice labels too.
-    const displayName =
-      (typeof entry.name === "string" && entry.name) ||
-      (typeof entry.display_name === "string" && entry.display_name) ||
-      undefined;
-    if (displayName) caps.displayName = displayName;
-    const promptPrice = entry.pricing?.prompt;
-    if (
-      promptPrice !== undefined &&
-      (promptPrice === "0" || promptPrice === 0)
-    ) {
-      caps.free = true;
-    }
-    // Always record the id — sparse-response endpoints (NVIDIA NIM,
-    // bare Ollama, some Azure deployments) advertise just `id` with
-    // no context_length / pricing / display name, but the picker still
-    // needs to list them. Storing with an empty caps record gives the
-    // picker something to render; caps is purely additive metadata.
-    state.endpointModels.set(id, caps);
-    discovered += 1;
-    if (Object.keys(caps).length > 0) enriched += 1;
+  if (!state.baseURL) {
+    return Promise.resolve();
   }
-
-  log(
-    "agent",
-    `OpenAI Agents: discovered ${discovered} model${
-      discovered === 1 ? "" : "s"
-    } (${enriched} enriched) from ${url}`,
-  );
+  return refreshDiscovery(state.baseURL, state.apiKey);
 }
 
 /**

@@ -947,6 +947,16 @@ async function startChat(): Promise<void> {
   const { backend } = await initBackendAndDispatcher(config, frontend);
   gateway.backend = backend;
 
+  // Mirror the index.ts wiring: keep the gateway's cached backend
+  // reference in sync with chat-role rebinds.
+  const { onBackendChange, roleHolder } =
+    await import("./core/backend-controller.js");
+  const CHAT_ROLE_HOLDER = roleHolder("chat");
+  onBackendChange((holder, newBackend) => {
+    if (holder !== CHAT_ROLE_HOLDER) return;
+    gateway.backend = newBackend;
+  });
+
   process.on("SIGINT", () => {
     flushSessions();
     flushChatSettings();

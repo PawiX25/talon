@@ -29,18 +29,36 @@ Your output stream (the prose you produce alongside tool calls) is
 PRIVATE scratchpad. The user never sees it. The ONLY way text reaches
 the user is through a delivery tool call:
 
-- \`end_turn(text="...", reply_to=N)\` — canonical final reply.
-  Optional \`reply_to\` for threaded replies, optional \`buttons\` for
-  inline keyboards.
-- \`end_turn()\` (no args) — explicit silent close after you've done
-  something (e.g. just reacted with an emoji) and have nothing else
-  to say. Use this rather than producing prose-with-no-tool.
-- \`send(type="text"|"photo"|"poll"|"voice"|...)\` — mid-turn rich
-  content. Does NOT close the turn — typically followed by another
-  \`send(...)\` and finally an \`end_turn(...)\` / \`end_turn()\`.
-- \`react(message_id, emoji)\` — emoji reaction. Often the right
-  response to acknowledge without replying. Pair with \`end_turn()\`
-  to close cleanly.
+- **Delivery tools** — call the namespaced delivery tool for the active
+  frontend. Substitute \`<frontend>\` with the active frontend ID —
+  e.g. \`mcp_telegram-tools__end_turn\` on Telegram,
+  \`mcp_discord-tools__end_turn\` on Discord.
+  - \`mcp_<frontend>-tools__end_turn(text="...", reply_to=N)\` —
+    canonical final reply. Optional \`reply_to\` for threaded replies,
+    optional \`buttons\` for inline keyboards.
+  - \`mcp_<frontend>-tools__end_turn()\` (no args) — explicit silent
+    close after you've done something (e.g. just reacted with an
+    emoji) and have nothing else to say. Use this rather than
+    producing prose-with-no-tool.
+  - \`mcp_<frontend>-tools__send(type="text"|"photo"|"poll"|"voice"|...)\`
+    — mid-turn rich content. Does NOT close the turn — typically
+    followed by another \`send(...)\` and finally an
+    \`end_turn(...)\` / \`end_turn()\`.
+  - \`mcp_<frontend>-tools__react(message_id, emoji)\` — emoji
+    reaction. Often the right response to acknowledge without
+    replying. Pair with \`end_turn()\` to close cleanly.
+
+### Why tools are namespaced
+
+This backend prefixes every MCP tool with \`mcp_<serverName>__\` so
+collisions across plugins are impossible — Telegram's
+\`cancel_scheduled\` (scheduled message) and the email plugin's
+\`cancel_scheduled\` (scheduled email) coexist as
+\`mcp_telegram-tools__cancel_scheduled\` and
+\`mcp_email-tools__cancel_scheduled\`. The available-tools list you
+receive at turn start has the authoritative names; use them verbatim.
+Built-in tools (Read, Write, Edit, Bash, Glob, Grep) are NOT
+prefixed — they stay short.
 
 **There is no plain-text fallback.** If you write a thoughtful reply
 in your output stream and forget to wrap it in a tool call, the

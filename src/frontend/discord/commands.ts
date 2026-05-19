@@ -80,6 +80,7 @@ import {
   registerDiscordChat,
 } from "./handlers.js";
 import { deriveNumericChatId } from "../../util/chat-id.js";
+import { resolveChatBackend } from "../../core/backend-controller.js";
 import { log, logError, logWarn } from "../../util/log.js";
 import {
   suppressMentions,
@@ -560,8 +561,14 @@ async function handleReset(
   resetSession(chatId);
   clearHistory(chatId);
   resetPulseCheckpoint(chatId);
-  gateway?.backend?.resetChat?.(chatId);
-  await gateway?.backend?.warmSession?.(chatId);
+  // Warm the per-chat backend so cold-start latency doesn't show up
+  // on the next turn — must be the actual chat backend, not the
+  // global default, when this chat has an override pinned.
+  const chatBackend = resolveChatBackend(chatId, gateway?.backend);
+  // Wipe any in-process backend memory (e.g. openai-agents'
+  // MemorySession). Stateless backends ignore this.
+  chatBackend?.resetChat?.(chatId);
+  await chatBackend?.warmSession?.(chatId);
   await reply(i, "Session cleared.", true);
 }
 
@@ -591,7 +598,9 @@ async function handleStatus(
   let displayCacheWrite = u.totalCacheWrite;
   let turnsModelLabel = info.lastModel;
 
-  const be = gateway?.backend;
+  // Per-chat backend so /status reports the active provider's
+  // context window, not the global default's.
+  const be = resolveChatBackend(chatId, gateway?.backend);
   if (be?.getModelInfo) {
     const mi = await be.getModelInfo(activeModel).catch(() => undefined);
     if (mi?.contextWindow) ctxMax = ctxMax || mi.contextWindow;
@@ -663,7 +672,11 @@ async function handleModel(
 
   const arg = i.options.getString("name")?.trim();
   const activeModel = getChatSettings(chatId).model ?? config.model;
-  const be = gateway?.backend;
+  // Per-chat backend — /model picks for the backend serving *this*
+  // chat, override-aware. Without this, switching to openai-agents
+  // in one channel and running /model in another would show the
+  // wrong catalog.
+  const be = resolveChatBackend(chatId, gateway?.backend);
 
   if (
     !arg ||
@@ -873,9 +886,11 @@ async function handleSettings(
 
   let modelDetails: Array<string> | undefined;
   let modelButtons: Array<{ text: string; callback_data: string }> | undefined;
-  if (gateway?.backend?.getSettingsPresentation) {
-    const presentation =
-      await gateway.backend.getSettingsPresentation(activeModel);
+  // Per-chat backend so /settings shows the catalog of whichever
+  // backend is currently serving this chat.
+  const settingsBe = resolveChatBackend(chatId, gateway?.backend);
+  if (settingsBe?.getSettingsPresentation) {
+    const presentation = await settingsBe.getSettingsPresentation(activeModel);
     modelDetails = presentation.modelDetails;
     modelButtons = presentation.modelButtons;
   }

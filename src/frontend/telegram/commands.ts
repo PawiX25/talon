@@ -45,9 +45,12 @@ import {
   renderSettingsKeyboard,
   renderModelMenuText,
   renderModelMenuKeyboard,
-  buildModelMenuState,
   type SettingsButton,
 } from "./helpers.js";
+import {
+  buildModelMenuViewForChat,
+  resolveBackendForChat,
+} from "./model-menu.js";
 import { handleAdminCommand } from "./admin.js";
 import { getLoadedPlugins } from "../../core/plugin.js";
 import { getMetrics } from "../../util/metrics.js";
@@ -99,7 +102,7 @@ export function registerCommands(
         "",
         "<b>\uD83E\uDD85 Settings</b>",
         "  /settings -- view and change all chat settings",
-        "  /model -- show or change model",
+        "  /model -- show or change model and backend",
         "  /effort -- set thinking effort (off, low, medium, high, max)",
         "  /pulse -- toggle periodic check-ins (on/off)",
         "",
@@ -161,11 +164,14 @@ export function registerCommands(
     resetSession(cid);
     clearHistory(cid);
     resetPulseCheckpoint(cid);
+    // Resolve the per-chat backend so the reset+warm hits the correct
+    // provider when this chat has a backend override pinned.
+    const chatBackend = resolveBackendForChat(cid, gateway);
     // Wipe any in-process backend memory (e.g. openai-agents'
     // MemorySession). Stateless backends ignore this.
-    gateway?.backend?.resetChat?.(cid);
-    // Warm up the new session so /status has context data immediately
-    await gateway?.backend?.warmSession?.(cid);
+    chatBackend?.resetChat?.(cid);
+    // Warm up the new session so /status has context data immediately.
+    await chatBackend?.warmSession?.(cid);
     await ctx.reply("Session cleared.");
   });
 
@@ -199,7 +205,6 @@ export function registerCommands(
     const cid = String(ctx.chat.id);
     const arg = ctx.match?.trim();
     const activeModel = getChatSettings(cid).model ?? config.model;
-    const be = gateway?.backend;
 
     if (
       !arg ||
@@ -215,32 +220,17 @@ export function registerCommands(
         return;
       }
       // Render the main /model menu. Browsing the catalog happens
-      // behind the "Browse models" button — see callbacks.ts.
-      if (be?.getSettingsPresentation) {
-        const freeOnly = getChatSettings(cid).freeOnly === true;
-        const state = await buildModelMenuState({
-          chatId: cid,
-          activeModel,
-          defaultModel: config.model,
-          freeOnly,
-          fetchSnapshot: async () => {
-            const pres = await be.getSettingsPresentation!(activeModel, {
-              callbackPrefix: "model:",
-              navCallbackPrefix: "model:nav",
-              filter: freeOnly ? "free" : "all",
-            });
-            return {
-              freeCount: pres.freeCount,
-              totalCount: pres.totalCount,
-              modelDetails: pres.modelDetails,
-            };
-          },
-          fetchActiveDisplay: async () =>
-            (await be.getModelInfo?.(activeModel))?.displayName,
-        });
-        await ctx.reply(renderModelMenuText(state), {
+      // behind the "Browse models" button — see callbacks.ts. The
+      // controller resolves the per-chat backend so the menu reflects
+      // any active per-chat override (e.g. a chat switched to
+      // openai-agents in a Claude-default install).
+      const view = await buildModelMenuViewForChat(cid, config, gateway);
+      if (view) {
+        await ctx.reply(renderModelMenuText(view.state), {
           parse_mode: "HTML",
-          reply_markup: { inline_keyboard: renderModelMenuKeyboard(state) },
+          reply_markup: {
+            inline_keyboard: renderModelMenuKeyboard(view.state),
+          },
         });
       } else {
         await ctx.reply(
@@ -253,7 +243,9 @@ export function registerCommands(
       return;
     }
 
-    // Resolve model query via backend
+    // Resolve `/model <id>` against the *per-chat* backend — that's
+    // the one currently serving this chat, override-aware.
+    const be = resolveBackendForChat(cid, gateway);
     if (be?.resolveModel) {
       const resolution = await be.resolveModel(arg);
       if (resolution.kind !== "exact") {
@@ -497,8 +489,10 @@ export function registerCommands(
     let displayCacheWrite = u.totalCacheWrite;
     let turnsModelLabel = info.lastModel;
 
-    // Enrich context/usage data from backend when available
-    const be = gateway?.backend;
+    // Enrich context/usage data from the per-chat backend so /status
+    // reports the active provider's context window, not the global
+    // default's.
+    const be = resolveBackendForChat(cid, gateway);
     if (be?.getModelInfo) {
       const modelInfo = await be
         .getModelInfo(activeModel)

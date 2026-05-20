@@ -28,6 +28,7 @@ import { log, logWarn } from "../../util/log.js";
 import { getState } from "./state.js";
 import { asCodexConfig, buildCodexMcpServers } from "./mcp-config.js";
 import { detectCodexAuth, type CodexAuthInfo } from "./auth.js";
+import { startDiscovery } from "./discovery.js";
 
 /** Cached auth-mode detection result — updated on every `initCodexAgent`. */
 let cachedAuthInfo: CodexAuthInfo | null = null;
@@ -73,6 +74,16 @@ export function initCodexAgent(
   });
   cachedAuthInfo = authInfo;
   logAuthInfo(authInfo);
+
+  // Kick off model discovery as fire-and-forget. Branches on auth
+  // mode internally:
+  //   - chatgpt OAuth → reads `~/.codex/models_cache.json` (Codex CLI
+  //     populates this from ChatGPT's backend API, including rich
+  //     metadata we don't have to maintain ourselves).
+  //   - api-key → hits OpenAI's `/v1/models` with the bearer key.
+  //   - none → no-op (resolves immediately, picker falls back to
+  //     curated).
+  void startDiscovery(authInfo);
 }
 
 function logAuthInfo(info: CodexAuthInfo): void {

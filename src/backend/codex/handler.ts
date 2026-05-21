@@ -73,11 +73,16 @@ import {
   CODEX_SYSTEM_PROMPT_SUFFIX,
   CODEX_DEFAULT_MODEL,
   CODEX_CHATGPT_DEFAULT_MODEL,
+  CODEX_THREAD_PERMISSIONS,
 } from "./constants.js";
 import { getState } from "./state.js";
 import { ensureCodex, getCodexAuthInfo } from "./init.js";
 import { isChatGptModelMismatchError, isSilentOAuthExitError } from "./auth.js";
-import { chatGptFallbackFor, isCodexOAuthIncompat } from "./models.js";
+import {
+  chatGptFallbackFor,
+  getModelInfo,
+  isCodexOAuthIncompat,
+} from "./models.js";
 import { markOAuthIncompat } from "./oauth-incompat.js";
 
 // ── Local utility ───────────────────────────────────────────────────────────
@@ -291,21 +296,17 @@ export async function handleMessage(
   // ThreadOptions:
   //   - `skipGitRepoCheck` — Codex normally insists on running inside
   //     a git repo. We're an assistant, not a coding session.
-  //   - `sandboxMode: "read-only"` — Talon's tool surface comes from
-  //     MCP plugins (mempalace, brave, github, etc.); Codex's own
-  //     filesystem / shell tools aren't part of the assistant's job.
-  //     Sandbox blocks them silently.
-  //   - `approvalPolicy: "never"` — auto-deny any tool that would
-  //     otherwise prompt the user. MCP tools execute through the
-  //     bridge and bypass this policy entirely.
-  //   - `networkAccessEnabled: false` — same reasoning as sandboxMode.
-  //     If Codex needs net it goes through the brave-search MCP.
+  //   - Permission triple (`approvalPolicy` / `sandboxMode` /
+  //     `networkAccessEnabled`) is centralised in
+  //     `CODEX_THREAD_PERMISSIONS`; see that constant for the
+  //     security-boundary reasoning. Tl;dr: Codex runs with the same
+  //     full-access posture as every other Talon backend — restricting
+  //     it tighter than its siblings just produces silent tool
+  //     failures.
   const threadOptions = {
     model: activeModel,
     skipGitRepoCheck: true,
-    sandboxMode: "read-only" as const,
-    approvalPolicy: "never" as const,
-    networkAccessEnabled: false,
+    ...CODEX_THREAD_PERMISSIONS,
   };
   const thread: Thread = session.sessionId
     ? codex.resumeThread(session.sessionId, threadOptions)
@@ -468,6 +469,7 @@ export async function handleMessage(
   incrementCounter("queries_total");
 
   incrementTurns(chatId);
+  const modelInfo = await getModelInfo(activeModel).catch(() => undefined);
   recordUsage(chatId, {
     inputTokens: streamState.sdkInputTokens,
     outputTokens: streamState.sdkOutputTokens,
@@ -475,6 +477,7 @@ export async function handleMessage(
     cacheWrite: streamState.sdkCacheWrite,
     durationMs,
     model: activeModel,
+    contextWindow: modelInfo?.contextWindow,
   });
 
   // Set a descriptive session name from the user's first message.

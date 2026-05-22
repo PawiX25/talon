@@ -187,6 +187,12 @@ export function synthesizeUnknownModel(id: string): CodexModelInfo {
     selectable: true,
     reasoning,
     ...(meta?.contextWindow ? { contextWindow: meta.contextWindow } : {}),
+    ...(meta?.supportedReasoningLevels
+      ? { supportedReasoningLevels: meta.supportedReasoningLevels }
+      : {}),
+    ...(meta?.defaultReasoningLevel
+      ? { defaultReasoningLevel: meta.defaultReasoningLevel }
+      : {}),
   };
 }
 
@@ -198,6 +204,12 @@ function withDiscoveredMetadata(model: CodexModelInfo): CodexModelInfo {
     ...model,
     ...(meta.displayName ? { displayName: meta.displayName } : {}),
     ...(meta.contextWindow ? { contextWindow: meta.contextWindow } : {}),
+    ...(meta.supportedReasoningLevels
+      ? { supportedReasoningLevels: meta.supportedReasoningLevels }
+      : {}),
+    ...(meta.defaultReasoningLevel
+      ? { defaultReasoningLevel: meta.defaultReasoningLevel }
+      : {}),
   };
 }
 

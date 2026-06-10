@@ -40,6 +40,8 @@ export const ALL_TOOLS: readonly ToolDefinition[] = [
  * trailing scratchpad prose after declaring "I'm done", which trips the
  * flow-violation re-prompt path. Declaration is on the tool definition
  * (`endsTurn: true`); detection is shared; abort is backend-specific.
+ *
+ * The set is computed once at module load from `ALL_TOOLS`.
  */
 const TURN_TERMINATOR_NAMES: ReadonlySet<string> = new Set(
   ALL_TOOLS.filter((t) => t.endsTurn).map((t) => t.name),

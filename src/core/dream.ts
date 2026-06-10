@@ -18,7 +18,8 @@ import writeFileAtomic from "write-file-atomic";
 import { files as pathFiles, dirs } from "../util/paths.js";
 import { log, logError, logWarn } from "../util/log.js";
 import { getDefaultModel } from "./models.js";
-import type { OneShotAgentParams, QueryBackend } from "./types.js";
+import type { OneShotAgentParams } from "./types.js";
+import type { Backend } from "./agent-runtime/capabilities.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,12 +47,14 @@ let configRef: {
   model?: string;
   dreamModel?: string;
   workspace?: string;
+  /** When false, `maybeStartDream` never fires (config `dream: false`). */
+  enabled?: boolean;
   /**
    * Accessor for the active backend — invoked each time a dream fires
    * so backend hot-swaps performed by the controller take effect on
    * the next dream without an `initDream` recall.
    */
-  getBackend?: () => QueryBackend | null;
+  getBackend?: () => Backend | null;
   /**
    * MemPalace presence flag — controls the system-prompt copy that tells the
    * dream agent whether mempalace MCP tools are available. The actual MCP
@@ -65,12 +68,14 @@ export function initDream(cfg: {
   /** Override model for dream consolidation (e.g. a cheaper model). Falls back to main model. */
   dreamModel?: string;
   workspace?: string;
+  /** Gate for automatic dream runs — config `dream` flag. Defaults to enabled. */
+  enabled?: boolean;
   /**
-   * Provider for the active backend — dream runs `backend.runOneShotAgent`.
+   * Provider for the active backend — dream runs `backend.background?.runOneShotAgent`.
    * Passed as a function (rather than a backend reference) so a backend
    * swap mid-cycle is picked up on the next dream invocation.
    */
-  getBackend?: () => QueryBackend | null;
+  getBackend?: () => Backend | null;
   /** MemPalace config for mining logs into the palace during dream runs. */
   mempalace?: { pythonPath: string; palacePath: string };
 }): void {
@@ -85,6 +90,7 @@ export function initDream(cfg: {
  */
 export function maybeStartDream(): void {
   if (dreaming) return;
+  if (configRef?.enabled === false) return;
 
   const state = readDreamState();
   const now = Date.now();
@@ -195,8 +201,11 @@ If commands fail, log the error and continue — this stage is optional.`
   const workspace = configRef.workspace ?? dirs.workspace;
 
   const backend = configRef.getBackend?.() ?? null;
-  if (!backend?.runOneShotAgent) {
-    throw new Error("Dream requires a backend that implements runOneShotAgent");
+  const background = backend?.background;
+  if (!background) {
+    throw new Error(
+      "Dream requires a backend that implements the background capability",
+    );
   }
 
   // Set up dream log file
@@ -246,7 +255,7 @@ If commands fail, log the error and continue — this stage is optional.`
   });
 
   const agentPromise = (async () => {
-    await backend.runOneShotAgent!(oneShotParams);
+    await background.runOneShotAgent(oneShotParams);
     appendDreamLog(
       dreamLogFile,
       `\n---\n**Dream completed at ${new Date().toISOString()}**\n`,

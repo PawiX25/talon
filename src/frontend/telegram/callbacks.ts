@@ -7,11 +7,9 @@ import type { TalonConfig } from "../../util/config.js";
 import { logWarn } from "../../util/log.js";
 import {
   getChatSettings,
-  setChatModel,
   setChatModelForBackend,
   setChatBackend,
   setChatEffort,
-  clearAllChatModels,
   resolveModelName,
   type EffortLevel,
 } from "../../storage/chat-settings.js";
@@ -118,7 +116,9 @@ export async function answerCallbackQuerySafe(
 export function registerCallbacks(
   bot: Bot,
   config: TalonConfig,
-  gateway?: { backend: import("../../core/types.js").QueryBackend | null },
+  gateway?: {
+    backend: import("../../core/agent-runtime/capabilities.js").Backend | null;
+  },
 ): void {
   // ── Callback query handler ──────────────────────────────────────────────────
 
@@ -229,8 +229,11 @@ export function registerCallbacks(
         | undefined;
       let view: "models" | "groups" = "models";
       let activeProvider: string | undefined;
-      if (settingsBe?.getSettingsPresentation && resolvedSettingsModel) {
-        const pres = await settingsBe.getSettingsPresentation(
+      if (
+        settingsBe?.models?.getSettingsPresentation &&
+        resolvedSettingsModel
+      ) {
+        const pres = await settingsBe.models?.getSettingsPresentation(
           resolvedSettingsModel,
         );
         modelButtons = pres.modelButtons;
@@ -402,8 +405,8 @@ export function registerCallbacks(
         // against that catalog, not the global default's.
         const be = resolveBackendForChat(cid, gateway);
         const beId = getBackendIdForChat(cid);
-        if (be?.resolveModel) {
-          const resolution = await be.resolveModel(action.modelId);
+        if (be?.models?.resolveModelInfo) {
+          const resolution = await be.models?.resolveModelInfo(action.modelId);
           if (resolution.kind !== "exact" || !resolution.model.selectable) {
             await answerCallbackQuerySafe(ctx, {
               text:

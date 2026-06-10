@@ -7,7 +7,7 @@
 
 import pc from "picocolors";
 import type { TalonConfig } from "../../util/config.js";
-import type { QueryBackend } from "../../core/types.js";
+import type { Backend } from "../../core/agent-runtime/capabilities.js";
 import type { Renderer } from "./renderer.js";
 import { formatTimeAgo } from "./renderer.js";
 import { isTerminalChatId } from "../../util/chat-id.js";
@@ -27,7 +27,7 @@ export type CommandContext = {
   /** Close the terminal (for /quit). */
   close: () => void;
   /** AI backend (available after bootstrap). */
-  backend?: QueryBackend | null;
+  backend?: Backend | null;
 };
 
 export type CommandHandler = (
@@ -107,7 +107,7 @@ export function registerBuiltinCommands(): void {
       const lowerArgs = trimmedArgs.toLowerCase();
 
       if (!trimmedArgs) {
-        const modelInfo = await be?.getModelInfo?.(currentModel);
+        const modelInfo = await be?.models?.getRawModelInfo?.(currentModel);
         const displayName = modelInfo?.displayName ?? currentModel;
         const details = modelInfo
           ? [
@@ -126,8 +126,8 @@ export function registerBuiltinCommands(): void {
             `  Context window: ${modelInfo.contextWindow.toLocaleString()}`,
           );
         }
-        if (be?.getProviders) {
-          const providers = await be.getProviders();
+        if (be?.models?.getProviders) {
+          const providers = await be.models?.getProviders();
           const connected = providers.filter((p) => p.connected);
           if (connected.length > 0) {
             ctx.renderer.writeln(
@@ -150,9 +150,9 @@ export function registerBuiltinCommands(): void {
       }
 
       if (lowerArgs === "free" || lowerArgs === "list" || lowerArgs === "all") {
-        if (be?.listModels) {
+        if (be?.models?.listModels) {
           const filter = lowerArgs === "free" ? "free" : "all";
-          const { models, total } = await be.listModels(filter);
+          const { models, total } = await be.models.listModels(filter);
           const list = models.slice(0, 20);
           ctx.renderer.writeSystem(
             `${filter === "free" ? "Free" : "Available"} models (${total})`,
@@ -177,8 +177,8 @@ export function registerBuiltinCommands(): void {
       }
 
       if (lowerArgs === "providers") {
-        if (be?.getProviders) {
-          const providers = await be.getProviders();
+        if (be?.models?.getProviders) {
+          const providers = await be.models?.getProviders();
           ctx.renderer.writeSystem(`Providers (${providers.length})`);
           for (const p of providers.slice(0, 20)) {
             ctx.renderer.writeln(
@@ -193,11 +193,11 @@ export function registerBuiltinCommands(): void {
       }
 
       // Resolve model query via backend
-      if (be?.resolveModel) {
-        const resolution = await be.resolveModel(trimmedArgs);
+      if (be?.models?.resolveModelInfo) {
+        const resolution = await be.models?.resolveModelInfo(trimmedArgs);
         if (resolution.kind === "missing") {
           const msg =
-            be.formatModelError?.(trimmedArgs, resolution) ??
+            be.models?.formatModelError?.(trimmedArgs, resolution) ??
             `No model matched "${trimmedArgs}".`;
           ctx.renderer.writeError(msg);
           ctx.reprompt();
@@ -280,9 +280,9 @@ export function registerBuiltinCommands(): void {
       const nameStr = info.sessionName ? `"${info.sessionName}"  ·  ` : "";
 
       // Enrich from backend when available
-      if (be?.getSessionSnapshot && info.sessionId) {
-        const snap = await be
-          .getSessionSnapshot(info.sessionId)
+      if (be?.usage?.getSessionSnapshot && info.sessionId) {
+        const snap = await be.usage
+          ?.getSessionSnapshot(info.sessionId)
           .catch(() => undefined);
         if (snap) {
           displayInputTokens = snap.inputTokens ?? displayInputTokens;
@@ -298,11 +298,11 @@ export function registerBuiltinCommands(): void {
         cacheRead: displayCacheRead,
         cacheWrite: displayCacheWrite,
       });
-      if (be?.getModelInfo) {
-        const modelInfo = await be
-          .getModelInfo(activeModel)
+      if (be?.models?.getRawModelInfo) {
+        const modelInfo = await be.models
+          ?.getRawModelInfo(activeModel)
           .catch(() => undefined);
-        const label = be.backendLabel ?? "Backend";
+        const label = be.label ?? "Backend";
         if (modelInfo) {
           backendModelLine = `  ${pc.bold(label)}  ${modelInfo.displayName}  ·  ${modelInfo.providerName}${modelInfo.free ? " · free" : ""}`;
           if (modelInfo.contextWindow) {

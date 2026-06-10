@@ -14,18 +14,14 @@
  *   - error throws BridgedAgentError carrying the AgentError
  *   - tool_result / usage / model_swapped / warning are observed
  *     silently (no legacy callback equivalent)
- *
- * Also tests `reduceEventsToResult` — the QueryResult-shape
- * fallback that backends use during the migration window.
  */
 
 import { describe, it, expect, vi } from "vitest";
 import {
   BridgedAgentError,
   pipeEventsToCallbacks,
-  reduceEventsToResult,
   type LegacyCallbacks,
-} from "../core/agent-runtime/legacy-bridge.js";
+} from "../core/agent-runtime/event-bridge.js";
 import type { AgentEvent } from "../core/agent-runtime/events.js";
 
 function streamOf(events: AgentEvent[]): AsyncIterable<AgentEvent> {
@@ -123,6 +119,51 @@ describe("pipeEventsToCallbacks / streaming", () => {
     );
     expect(blocks).toEqual(["first "]);
     expect(deltas).toEqual([["first second", "text"]]);
+  });
+
+  it("resolves assistant_message delivery acknowledgements after onTextBlock succeeds", async () => {
+    const resolved = vi.fn();
+    await pipeEventsToCallbacks(
+      streamOf([
+        {
+          type: "assistant_message",
+          text: "sent",
+          deliveryAck: { resolve: resolved, reject: vi.fn() },
+        },
+        {
+          type: "completed",
+          result: { text: "sent", durationMs: 1, usage: emptyUsage() },
+        },
+      ]),
+      { onTextBlock: vi.fn().mockResolvedValue(undefined) },
+    );
+
+    expect(resolved).toHaveBeenCalledOnce();
+  });
+
+  it("rejects assistant_message delivery acknowledgements when onTextBlock fails", async () => {
+    const rejected = vi.fn();
+    await pipeEventsToCallbacks(
+      streamOf([
+        {
+          type: "assistant_message",
+          text: "too long",
+          deliveryAck: { resolve: vi.fn(), reject: rejected },
+        },
+        {
+          type: "completed",
+          result: { text: "retry later", durationMs: 1, usage: emptyUsage() },
+        },
+      ]),
+      {
+        onTextBlock: vi
+          .fn()
+          .mockRejectedValue(new Error("Telegram message too long")),
+      },
+    );
+
+    expect(rejected).toHaveBeenCalledOnce();
+    expect(rejected.mock.calls[0]?.[0]).toBeInstanceOf(Error);
   });
 
   it("awaits each onTextBlock before processing the next event", async () => {
@@ -350,82 +391,5 @@ describe("pipeEventsToCallbacks / silent events", () => {
       durationMs: 1,
       usage: emptyUsage(),
     });
-  });
-});
-
-// ── reduceEventsToResult ───────────────────────────────────────────────────
-
-describe("reduceEventsToResult", () => {
-  it("returns the result from a completed terminator verbatim", async () => {
-    const out = await reduceEventsToResult(
-      streamOf([
-        { type: "text_delta", text: "ignored" },
-        {
-          type: "completed",
-          result: {
-            text: "final",
-            durationMs: 42,
-            usage: emptyUsage(),
-            modelId: "gpt-5.5",
-          },
-        },
-      ]),
-    );
-    expect(out).toEqual({
-      text: "final",
-      durationMs: 42,
-      usage: emptyUsage(),
-      modelId: "gpt-5.5",
-    });
-  });
-
-  it("synthesises from deltas when stream ends without a completed terminator", async () => {
-    const out = await reduceEventsToResult(
-      streamOf([
-        { type: "text_delta", text: "Hello" },
-        { type: "text_delta", text: ", world" },
-        {
-          type: "usage",
-          usage: {
-            inputTokens: 10,
-            outputTokens: 5,
-            cacheRead: 0,
-            cacheWrite: 0,
-            modelId: "claude-opus-4-7",
-          },
-        },
-      ]),
-    );
-    expect(out.text).toBe("Hello, world");
-    expect(out.usage.inputTokens).toBe(10);
-    expect(out.usage.outputTokens).toBe(5);
-    expect(out.modelId).toBe("claude-opus-4-7");
-  });
-
-  it("throws BridgedAgentError on an error terminator", async () => {
-    await expect(
-      reduceEventsToResult(
-        streamOf([
-          {
-            type: "error",
-            error: {
-              kind: "auth",
-              message: "401",
-              retryable: false,
-            },
-          },
-        ]),
-      ),
-    ).rejects.toThrow(BridgedAgentError);
-  });
-
-  it("folds assistant_message into the synthesised text on the no-terminator path", async () => {
-    const out = await reduceEventsToResult(
-      streamOf([
-        { type: "assistant_message", text: "block-a " },
-        { type: "text_delta", text: "delta-b" },
-      ]),
-    );
-    expect(out.text).toBe("block-a delta-b");
   });
 });

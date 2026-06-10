@@ -10,12 +10,9 @@
  */
 
 import { randomBytes } from "node:crypto";
-import type {
-  QueryBackend,
-  ContextManager,
-  ExecuteParams,
-  ExecuteResult,
-} from "./types.js";
+import type { ContextManager, ExecuteParams, ExecuteResult } from "./types.js";
+import type { Backend } from "./agent-runtime/capabilities.js";
+import { pipeEventsToCallbacks } from "./agent-runtime/event-bridge.js";
 import { log, logDebug, logWarn } from "../util/log.js";
 import { maybeStartDream } from "./dream.js";
 
@@ -28,17 +25,19 @@ import { maybeStartDream } from "./dream.js";
  * stub that ignores the chat id. See `core/backend-controller.ts`.
  *
  * `resolveActiveModel` walks the 5-step active-model resolution
- * chain for the chat. Returns `null` when no model is selected AND
- * no operator default exists — the dispatcher then refuses to call
- * `backend.query` and replies with a "use /model to pick one"
- * message. Optional — if omitted (legacy/test path) the send guard
- * is skipped and every query passes through.
+ * chain for the chat and returns both the resolved `ModelRef` and
+ * the raw string + backend id. When `ref` and `model` are both
+ * `null`, the dispatcher refuses to call the backend and replies
+ * with a "use /model to pick one" message — submitting an empty
+ * model id would either error opaquely or run on the wrong default.
  */
 type DispatcherDeps = {
-  getBackend: (chatId?: string) => QueryBackend;
-  resolveActiveModel?: (
-    chatId: string,
-  ) => Promise<{ model: string | null; backendId: string }>;
+  getBackend: (chatId?: string) => Backend;
+  resolveActiveModel: (chatId: string) => Promise<{
+    model: string | null;
+    ref: import("./agent-runtime/model-ref.js").ModelRef | null;
+    backendId: string;
+  }>;
   context: ContextManager;
   sendTyping: (chatId: number) => Promise<void>;
   onActivity: () => void;
@@ -111,48 +110,43 @@ async function executeInner(params: ExecuteParams): Promise<ExecuteResult> {
   const reqId = randomBytes(4).toString("hex");
 
   // Send-time null-model guard. When the active-model resolver
-  // returns null (catalog-driven backend with no per-chat pick and
-  // no operator default), refuse to call backend.query — most
-  // backends would either error opaquely or submit an empty model id
-  // to the CLI. Reply with a clear "use /model to pick one" message
-  // routed through the same onTextBlock callback the backend would
-  // use for output. Bypassed entirely when deps don't include the
-  // resolver (legacy / test path).
-  let resolvedModel: string | undefined;
-  if (resolveActiveModel) {
-    const { model, backendId } = await resolveActiveModel(params.chatId);
-    if (model === null) {
-      const message =
-        `No model selected for backend \`${backendId}\`. ` +
-        `Use /model to pick one — or set ` +
-        `\`backendDefaults.${backendId}\` in talon.json to apply a ` +
-        `default for all chats on this backend.`;
+  // returns no usable model (catalog-driven backend with no per-chat
+  // pick and no operator default), refuse to call the backend — it
+  // would either error opaquely or run on the wrong default. Reply
+  // with a clear "use /model to pick one" message routed through the
+  // same onTextBlock callback the backend would use for output.
+  const {
+    model: resolvedModel,
+    ref: resolvedRef,
+    backendId,
+  } = await resolveActiveModel(params.chatId);
+  if (resolvedModel === null || resolvedRef === null) {
+    const message =
+      `No model selected for backend \`${backendId}\`. ` +
+      `Use /model to pick one — or set ` +
+      `\`backendDefaults.${backendId}\` in talon.json to apply a ` +
+      `default for all chats on this backend.`;
+    logWarn(
+      "dispatcher",
+      `[${reqId}] refusing query: no model resolved (chat=${params.chatId}, backend=${backendId})`,
+    );
+    try {
+      await params.onTextBlock?.(message);
+    } catch (err) {
       logWarn(
         "dispatcher",
-        `[${reqId}] refusing query: no model resolved (chat=${params.chatId}, backend=${backendId})`,
+        `onTextBlock(no-model) threw: ${err instanceof Error ? err.message : String(err)}`,
       );
-      // Emit the message via the same callback the backend would use
-      // for text output, so the frontend delivers it through the
-      // normal path (no special-casing required at the call site).
-      try {
-        await params.onTextBlock?.(message);
-      } catch (err) {
-        logWarn(
-          "dispatcher",
-          `onTextBlock(no-model) threw: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      return {
-        text: message,
-        durationMs: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        bridgeMessageCount: context.getMessageCount(params.numericChatId),
-      };
     }
-    resolvedModel = model;
+    return {
+      text: message,
+      durationMs: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      bridgeMessageCount: context.getMessageCount(params.numericChatId),
+    };
   }
 
   // Dream check — fire-and-forget background memory consolidation if due
@@ -181,17 +175,38 @@ async function executeInner(params: ExecuteParams): Promise<ExecuteResult> {
       });
     }, 4000);
 
-    const result = await backend.query({
+    // Consume the backend's native `AgentEvent` stream and pipe it
+    // back into the legacy callback shape the dispatcher's caller
+    // contract still uses. `pipeEventsToCallbacks` mirrors
+    // text_delta / assistant_message / tool_call into the supplied
+    // hooks and returns the final `AgentResult` from the
+    // `completed` event.
+    if (!backend.chat) {
+      throw new Error(
+        `Backend "${backend.id}" has no chat capability — cannot run a turn.`,
+      );
+    }
+    const stream = backend.chat.runChatTurn({
       chatId: params.chatId,
-      ...(resolvedModel ? { model: resolvedModel } : {}),
+      model: resolvedRef,
       text: params.prompt,
       senderName: params.senderName,
       isGroup: params.isGroup,
       messageId: params.messageId,
+    });
+    const agentResult = await pipeEventsToCallbacks(stream, {
       onStreamDelta: params.onStreamDelta,
       onTextBlock: params.onTextBlock,
       onToolUse: params.onToolUse,
     });
+    const result = {
+      text: agentResult?.text ?? "",
+      durationMs: agentResult?.durationMs ?? 0,
+      inputTokens: agentResult?.usage.inputTokens ?? 0,
+      outputTokens: agentResult?.usage.outputTokens ?? 0,
+      cacheRead: agentResult?.usage.cacheRead ?? 0,
+      cacheWrite: agentResult?.usage.cacheWrite ?? 0,
+    };
 
     onActivity();
 

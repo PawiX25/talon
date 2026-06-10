@@ -4,7 +4,7 @@
  * Each concrete backend (`claude-sdk`, `kilo`, `opencode`) exposes a
  * `factory.ts` module that registers itself by calling `registerBackend`.
  * Bootstrap looks up the requested backend by id, calls `init`, and
- * receives a fully-wired `QueryBackend` plus an optional cleanup hook.
+ * receives a fully-wired `Backend` plus an optional cleanup hook.
  *
  * Why a registry instead of `if/else` in bootstrap:
  *
@@ -21,7 +21,7 @@
  * `clearBackends()` is exposed for test isolation.
  */
 
-import type { QueryBackend } from "../core/types.js";
+import type { Backend } from "../core/agent-runtime/capabilities.js";
 import type { TalonConfig } from "../util/config.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -46,8 +46,8 @@ export interface BackendInitContext {
 
 /** Result returned by a backend factory's `init` step. */
 export interface BackendInstance {
-  /** The fully-wired QueryBackend the dispatcher will route to. */
-  backend: QueryBackend;
+  /** The fully-wired `Backend` the dispatcher will route to. */
+  backend: Backend;
   /**
    * Optional teardown hook invoked when Talon shuts down or hot-swaps
    * backends (future use). Idempotent: backends should tolerate multiple

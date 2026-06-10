@@ -4,7 +4,8 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import type { QueryBackend } from "../core/types.js";
+import type { Backend } from "../core/agent-runtime/capabilities.js";
+import { stubBackend } from "./helpers/stub-backend.js";
 import type { TalonConfig } from "../util/config.js";
 import {
   registerBackend,
@@ -28,8 +29,9 @@ import {
   clearBackendChangeListenersForTest,
 } from "../core/backend-controller.js";
 
-function makeStubBackend(label: string): QueryBackend {
-  return {
+function makeStubBackend(label: string): Backend {
+  return stubBackend({
+    label,
     query: vi.fn(async () => ({
       text: `[${label}] reply`,
       durationMs: 1,
@@ -38,7 +40,7 @@ function makeStubBackend(label: string): QueryBackend {
       cacheRead: 0,
       cacheWrite: 0,
     })),
-  };
+  });
 }
 
 function makeFactory(
@@ -48,7 +50,7 @@ function makeFactory(
     failInit?: boolean;
     cleanupSpy?: (id: string) => void;
     initSpy?: (id: string) => void;
-    backend?: QueryBackend;
+    backend?: Backend;
   } = {},
 ): BackendFactory {
   return {
@@ -280,62 +282,44 @@ describe("backend-controller", () => {
     expect(isBackendAvailable("ghost")).toBe(false);
   });
 
-  it("isModelValidForBackend uses getModelInfo when available", async () => {
-    const backend: QueryBackend = {
-      ...makeStubBackend("Alpha"),
-      getModelInfo: vi.fn(async (id: string) =>
-        id === "good"
-          ? {
-              id,
+  it("isModelValidForBackend trusts an exact selectable resolveModelInfo result", async () => {
+    const backend = stubBackend({
+      label: "Alpha",
+      resolveModel: vi.fn(async (query: string) => {
+        if (query === "good") {
+          return {
+            kind: "exact" as const,
+            storedValue: "good",
+            model: {
+              id: "good",
               displayName: "Good",
               provider: "test",
               providerName: "Test",
               selectable: true,
-            }
-          : id === "hidden"
-            ? {
-                id,
-                displayName: "Hidden",
-                provider: "test",
-                providerName: "Test",
-                selectable: false,
-              }
-            : undefined,
-      ),
-      resolveModel: vi.fn(async () => ({ kind: "missing" }) as const),
-    };
+            },
+          };
+        }
+        if (query === "hidden") {
+          return {
+            kind: "exact" as const,
+            storedValue: "hidden",
+            model: {
+              id: "hidden",
+              displayName: "Hidden",
+              provider: "test",
+              providerName: "Test",
+              selectable: false,
+            },
+          };
+        }
+        return { kind: "missing" as const };
+      }),
+    });
 
     await expect(isModelValidForBackend(backend, "good")).resolves.toBe(true);
     await expect(isModelValidForBackend(backend, "hidden")).resolves.toBe(
       false,
     );
-    await expect(isModelValidForBackend(backend, "missing")).resolves.toBe(
-      false,
-    );
-    expect(backend.resolveModel).not.toHaveBeenCalled();
-  });
-
-  it("isModelValidForBackend falls back to resolveModel", async () => {
-    const backend: QueryBackend = {
-      ...makeStubBackend("Alpha"),
-      resolveModel: vi.fn(async (query: string) =>
-        query === "good"
-          ? ({
-              kind: "exact",
-              storedValue: "good",
-              model: {
-                id: "good",
-                displayName: "Good",
-                provider: "test",
-                providerName: "Test",
-                selectable: true,
-              },
-            } as const)
-          : ({ kind: "missing" } as const),
-      ),
-    };
-
-    await expect(isModelValidForBackend(backend, "good")).resolves.toBe(true);
     await expect(isModelValidForBackend(backend, "missing")).resolves.toBe(
       false,
     );

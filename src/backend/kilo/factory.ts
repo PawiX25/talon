@@ -5,16 +5,21 @@
  * `registerBackend(...)` at module load, making Kilo available under
  * `config.backend === "kilo"`.
  *
- * The factory adapts Kilo's internal API to the generic `QueryBackend`
- * shape used by the dispatcher — translates `handleMessage`,
- * `runOneShotAgent`, the session-snapshot envelope, and the model
- * resolution methods.
+ * Returns a composed `Backend` with capability slots for chat,
+ * background, models, and usage.
  */
 
 import { registerBackend } from "../registry.js";
 import type { BackendFactory } from "../registry.js";
-import type { QueryBackend } from "../../core/types.js";
 import { log } from "../../util/log.js";
+import { handlerToEvents } from "../shared/handler-to-events.js";
+import {
+  composeBackend,
+  type ChatBackend,
+  type BackgroundRunner,
+  type ModelCatalog,
+  type UsageTelemetry,
+} from "../../core/agent-runtime/capabilities.js";
 
 import {
   initKiloAgent,
@@ -22,16 +27,14 @@ import {
   handleMessage as kiloHandleMessage,
   runOneShotAgent as kiloRunOneShotAgent,
   getKiloSessionSnapshot,
-  resolveModel,
-  getModelInfo,
-  getSettingsPresentation,
-  getProviders,
-  getProviderModels,
-  formatModelError,
-  listModels,
+  resolveModel as kiloResolveModel,
+  getModelInfo as kiloGetModelInfo,
+  getSettingsPresentation as kiloGetSettingsPresentation,
+  getProviders as kiloGetProviders,
+  getProviderModels as kiloGetProviderModels,
+  formatModelError as kiloFormatModelError,
+  listModels as kiloListModels,
 } from "./index.js";
-
-// ── Factory ────────────────────────────────────────────────────────────────
 
 const kiloFactory: BackendFactory = {
   id: "kilo",
@@ -41,35 +44,49 @@ const kiloFactory: BackendFactory = {
     initKiloAgent(config, ctx.getBridgePort, ctx.frontendName);
     log("bot", "Backend: Kilo (@kilocode/sdk)");
 
-    const backend: QueryBackend = {
-      query: (params) => kiloHandleMessage(params),
-      resolveModel: (q) => resolveModel(q),
-      getModelInfo: (id) => getModelInfo(id),
+    const chat: ChatBackend = {
+      runChatTurn: (params) =>
+        handlerToEvents((p) => kiloHandleMessage(p), params),
+    };
+
+    const background: BackgroundRunner = {
+      runOneShotAgent: (p) => kiloRunOneShotAgent(p),
+      // Kilo runs a long-lived HTTP server — no per-query subprocesses.
+      // `evictOrphanSubprocesses` is intentionally not implemented.
+    };
+
+    const models: ModelCatalog = {
+      resolveModelInfo: (q) => kiloResolveModel(q),
+      // Catalog-driven backend with no canonical default — fall
+      // through to `config.backendDefaults.kilo`.
+      getDefaultModelId: () => undefined,
+      getRawModelInfo: (id) => kiloGetModelInfo(id),
       getSettingsPresentation: async (m, options) => {
-        // Kilo's existing helper returns legacy `{modelButtons,
-        // modelDetails}`. Wrap into the new ModelPickerResult shape;
-        // Kilo doesn't expose pagination or a free-tier filter so the
-        // result is always page 1 of 1 with filter "all".
-        const legacy = await getSettingsPresentation(
+        // Kilo's internal helper returns the bare picker shape;
+        // wrap into the canonical `ModelPickerResult`. Kilo doesn't
+        // expose pagination or a free-tier filter so the result is
+        // always page 1 of 1 with filter "all".
+        const inner = await kiloGetSettingsPresentation(
           m,
           options?.callbackPrefix,
         );
         return {
-          ...legacy,
+          ...inner,
           view: "models" as const,
           page: 1,
           totalPages: 1,
           filter: "all" as const,
           freeCount: 0,
-          totalCount: legacy.modelButtons.length,
+          totalCount: inner.modelButtons.length,
         };
       },
-      getProviders: () => getProviders(),
-      getProviderModels: (p, pg, ps) => getProviderModels(p, pg, ps),
-      formatModelError: (q, r) => formatModelError(q, r),
-      listModels: (f) => listModels(f),
-      cacheMetrics: "readwrite",
-      backendLabel: "Kilo",
+      getProviders: () => kiloGetProviders(),
+      getProviderModels: (p, pg, ps) => kiloGetProviderModels(p, pg, ps),
+      formatModelError: (q, r) => kiloFormatModelError(q, r),
+      listModels: (f) => kiloListModels(f),
+    };
+
+    const usage: UsageTelemetry = {
       getSessionSnapshot: async (sessionId) => {
         const snap = await getKiloSessionSnapshot(sessionId);
         if (!snap) return undefined;
@@ -81,10 +98,17 @@ const kiloFactory: BackendFactory = {
           contextModelId: snap.assistant?.modelID,
         };
       },
-      runOneShotAgent: (p) => kiloRunOneShotAgent(p),
-      // Kilo runs a long-lived HTTP server — no per-query subprocesses.
-      // `evictOrphanSubprocesses` is intentionally not implemented.
     };
+
+    const backend = composeBackend({
+      id: "kilo",
+      label: "Kilo",
+      cacheMetrics: "readwrite",
+      chat,
+      background,
+      models,
+      usage,
+    });
 
     return {
       backend,

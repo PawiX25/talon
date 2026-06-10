@@ -22,17 +22,7 @@ import {
   sameModelRef,
   type ModelRef,
 } from "../core/agent-runtime/model-ref.js";
-import {
-  allowsDelivery,
-  defaultRunPolicyFor,
-  requiresAmbientChat,
-  type RunKind,
-} from "../core/agent-runtime/run-policy.js";
-import {
-  applyToolFilter,
-  type ToolDescriptor,
-} from "../core/agent-runtime/tool-descriptor.js";
-import { deriveCapabilities } from "../core/agent-runtime/capabilities.js";
+import { composeBackend } from "../core/agent-runtime/capabilities.js";
 
 // ── events ──────────────────────────────────────────────────────────────────
 
@@ -166,180 +156,31 @@ describe("agent-runtime/model-ref", () => {
   });
 });
 
-// ── run-policy ──────────────────────────────────────────────────────────────
-
-describe("agent-runtime/run-policy", () => {
-  const kinds: RunKind[] = ["chat", "heartbeat", "dream", "trigger", "test"];
-
-  it("defaultRunPolicyFor returns the requested kind and a matching label", () => {
-    for (const kind of kinds) {
-      const policy = defaultRunPolicyFor(kind);
-      expect(policy.kind).toBe(kind);
-      expect(policy.label).toBe(kind);
-    }
-  });
-
-  it("chat policy allows ambient delivery and a persistent session", () => {
-    const policy = defaultRunPolicyFor("chat");
-    expect(allowsDelivery(policy)).toBe(true);
-    expect(requiresAmbientChat(policy)).toBe(true);
-    expect(policy.session.persistent).toBe(true);
-    expect(policy.tools.requireExplicitChatId).toBe(false);
-    expect(policy.logging.destination).toBe("inline");
-  });
-
-  it("heartbeat policy needs explicit chat_id on delivery tools", () => {
-    const policy = defaultRunPolicyFor("heartbeat");
-    expect(allowsDelivery(policy)).toBe(true);
-    expect(requiresAmbientChat(policy)).toBe(false);
-    expect(policy.session.persistent).toBe(false);
-    expect(policy.tools.requireExplicitChatId).toBe(true);
-    expect(policy.logging.destination).toBe("journal");
-    expect(policy.timeout.hardMs).toBeGreaterThan(0);
-  });
-
-  it("dream policy refuses delivery and filters out ambient-chat tools", () => {
-    const policy = defaultRunPolicyFor("dream");
-    expect(allowsDelivery(policy)).toBe(false);
-    expect(requiresAmbientChat(policy)).toBe(false);
-    expect(policy.tools.filter?.excludeDelivery).toBe(true);
-    expect(policy.tools.filter?.excludeAmbientChatTools).toBe(true);
-    expect(policy.logging.destination).toBe("dreamLog");
-  });
-
-  it("trigger policy mirrors heartbeat shape but logs inline", () => {
-    const policy = defaultRunPolicyFor("trigger");
-    expect(policy.delivery.mode).toBe("explicit");
-    expect(policy.tools.requireExplicitChatId).toBe(true);
-    expect(policy.logging.destination).toBe("inline");
-    expect(policy.session.persistent).toBe(false);
-  });
-
-  it("test policy is delivery-locked and tight on timeout", () => {
-    const policy = defaultRunPolicyFor("test");
-    expect(policy.delivery.mode).toBe("none");
-    expect(policy.timeout.hardMs).toBeLessThanOrEqual(60_000);
-    expect(policy.session.persistent).toBe(false);
-  });
-});
-
-// ── tool-descriptor ─────────────────────────────────────────────────────────
-
-describe("agent-runtime/tool-descriptor", () => {
-  const tools: ToolDescriptor[] = [
-    {
-      id: "mcp__telegram-tools__end_turn",
-      server: "telegram-tools",
-      name: "end_turn",
-      tags: ["messaging", "delivery"],
-      delivery: true,
-      requiresAmbientChat: true,
-    },
-    {
-      id: "mcp__telegram-tools__react",
-      server: "telegram-tools",
-      name: "react",
-      tags: ["messaging", "delivery"],
-      delivery: true,
-      requiresAmbientChat: true,
-    },
-    {
-      id: "mcp__mempalace-tools__mempalace_search",
-      server: "mempalace-tools",
-      name: "mempalace_search",
-      tags: ["memory", "readonly"],
-      readOnly: true,
-    },
-    {
-      id: "Bash",
-      name: "Bash",
-      tags: ["shell"],
-    },
-  ];
-
-  it("returns a copy of the list when no filter is given", () => {
-    const out = applyToolFilter(tools, undefined);
-    expect(out).toEqual(tools);
-    expect(out).not.toBe(tools);
-  });
-
-  it("filters by id allowlist", () => {
-    const out = applyToolFilter(tools, { ids: ["Bash"] });
-    expect(out.map((t) => t.id)).toEqual(["Bash"]);
-  });
-
-  it("filters by server allowlist", () => {
-    const out = applyToolFilter(tools, { servers: ["mempalace-tools"] });
-    expect(out.map((t) => t.id)).toEqual([
-      "mcp__mempalace-tools__mempalace_search",
-    ]);
-  });
-
-  it("requires every required tag", () => {
-    const out = applyToolFilter(tools, {
-      requiredTags: ["messaging", "delivery"],
-    });
-    expect(out.map((t) => t.name).sort()).toEqual(["end_turn", "react"]);
-  });
-
-  it("excludes forbidden tags", () => {
-    const out = applyToolFilter(tools, { forbiddenTags: ["messaging"] });
-    expect(out.map((t) => t.name).sort()).toEqual(["Bash", "mempalace_search"]);
-  });
-
-  it("readOnlyOnly drops non-readonly tools", () => {
-    const out = applyToolFilter(tools, { readOnlyOnly: true });
-    expect(out.map((t) => t.name)).toEqual(["mempalace_search"]);
-  });
-
-  it("excludeDelivery drops delivery tools", () => {
-    const out = applyToolFilter(tools, { excludeDelivery: true });
-    expect(out.map((t) => t.name).sort()).toEqual(["Bash", "mempalace_search"]);
-  });
-
-  it("excludeAmbientChatTools drops ambient-chat tools", () => {
-    const out = applyToolFilter(tools, { excludeAmbientChatTools: true });
-    expect(out.map((t) => t.name).sort()).toEqual(["Bash", "mempalace_search"]);
-  });
-
-  it("dream default policy filter excludes delivery + ambient-chat tools", () => {
-    const dreamPolicy = defaultRunPolicyFor("dream");
-    const out = applyToolFilter(tools, dreamPolicy.tools.filter);
-    expect(out.map((t) => t.name).sort()).toEqual(["Bash", "mempalace_search"]);
-  });
-});
-
 // ── capabilities ────────────────────────────────────────────────────────────
 
 describe("agent-runtime/capabilities", () => {
-  it("deriveCapabilities reflects populated slots", () => {
-    const caps = deriveCapabilities({
+  it("composeBackend leaves omitted slots undefined", () => {
+    const backend = composeBackend({
+      id: "claude",
+      label: "Test",
       chat: { runChatTurn: async function* () {} },
-      models: undefined,
-      sessions: undefined,
-      tools: undefined,
-      usage: undefined,
-      background: { runBackgroundTask: async function* () {} },
+      background: { runOneShotAgent: async () => undefined },
     });
-    expect(caps).toEqual({
-      chat: true,
-      background: true,
-      models: false,
-      sessions: false,
-      tools: false,
-      usage: false,
-    });
+    expect(backend.chat).toBeDefined();
+    expect(backend.background).toBeDefined();
+    expect(backend.models).toBeUndefined();
+    expect(backend.sessions).toBeUndefined();
+    expect(backend.tools).toBeUndefined();
+    expect(backend.usage).toBeUndefined();
+    expect(backend.control).toBeUndefined();
   });
 
-  it("deriveCapabilities returns all-false on empty input", () => {
-    const caps = deriveCapabilities({});
-    expect(caps).toEqual({
-      chat: false,
-      background: false,
-      models: false,
-      sessions: false,
-      tools: false,
-      usage: false,
+  it("composeBackend defaults cacheMetrics to none", () => {
+    const backend = composeBackend({
+      id: "claude",
+      label: "Test",
+      chat: { runChatTurn: async function* () {} },
     });
+    expect(backend.cacheMetrics).toBe("none");
   });
 });

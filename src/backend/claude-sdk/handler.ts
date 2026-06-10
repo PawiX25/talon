@@ -1,9 +1,14 @@
 /**
- * Main message handler — executes a user query through the Claude Agent SDK.
+ * Claude SDK chat-turn handler — natively emits `AgentEvent`s.
  *
- * Orchestrates the full lifecycle: prompt formatting, SDK query, stream
- * processing, error recovery (session expired / context overflow / model
- * fallback), token accounting, and session persistence.
+ * Drives the full lifecycle: prompt formatting, SDK query, native
+ * event emission per stream message, error recovery (session expired
+ * / context overflow / model fallback via `applyRetryDecisionStream`),
+ * token accounting, session persistence, and the flow-violation
+ * re-prompt loop.
+ *
+ * The exported async generator `runChatTurn` is what the factory wires
+ * onto `ChatBackend.runChatTurn` — no wrapper, no callback shim.
  */
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -20,7 +25,13 @@ import { incrementCounter, recordHistogram } from "../../util/metrics.js";
 import { isTurnTerminator, stripMcpPrefix } from "../../core/tools/index.js";
 
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
-import type { QueryParams, QueryResult } from "../../core/types.js";
+import {
+  type AgentEvent,
+  classifiedToAgentError,
+} from "../../core/agent-runtime/events.js";
+import type { ChatRunParams } from "../../core/agent-runtime/capabilities.js";
+import { makeBareModelRef } from "../../core/agent-runtime/model-ref.js";
+import { applyRetryDecisionStream } from "../shared/handle-retry.js";
 import { getConfig } from "./state.js";
 import { buildSdkOptions } from "./options.js";
 import {
@@ -41,7 +52,6 @@ import {
   FLOW_VIOLATION_MAX_RETRIES,
   captureDeliveredText,
   summarizeUsage,
-  applyRetryDecision,
 } from "../shared/index.js";
 
 // ── Post-result watchdog ────────────────────────────────────────────────────
@@ -83,38 +93,39 @@ export function getActiveQuery(chatId: string): Query | undefined {
   return activeQueries.get(chatId);
 }
 
-// ── Main handler ─────────────────────────────────────────────────────────────
+// ── Internal state passed across recursive retry calls ──────────────────────
 
-export async function handleMessage(
-  params: QueryParams,
-  _internal: { flowRetries?: number; errorRetried?: boolean } = {},
-): Promise<QueryResult> {
+type InternalState = { flowRetries?: number; errorRetried?: boolean };
+
+// ── Main chat-turn generator ────────────────────────────────────────────────
+
+/**
+ * Native chat-turn generator. Yields the canonical
+ * `run_started → text_delta* → reasoning* → assistant_message* →
+ * tool_call* → usage → completed` sequence. On error: emits an
+ * `error` event (after running the shared retry decision, which may
+ * recurse via `yield*` and produce the retry's event stream
+ * transparently). On flow violation: `yield* runChatTurn(retry
+ * params)` — the recursive call owns its `incrementTurns`, the
+ * caller deliberately doesn't increment.
+ */
+export async function* runChatTurn(
+  params: ChatRunParams,
+  _internal: InternalState = {},
+): AsyncIterable<AgentEvent> {
   const config = getConfig();
 
-  const {
-    chatId,
-    text,
-    senderName,
-    isGroup,
-    onTextBlock,
-    onStreamDelta,
-    onToolUse,
-  } = params;
+  const { chatId, text, senderName, isGroup } = params;
   const session = getSession(chatId);
   const t0 = Date.now();
 
-  // Rebuild system prompt on first turn of a new/reset session so identity,
-  // memory, and workspace listing are fresh. `prepareSystemPrompt` does
-  // this in place (mutates config.systemPrompt) — the Claude SDK reads
-  // from config.systemPrompt later via `buildSdkOptions`, so the rebuild
-  // has to land before that call.
   prepareSystemPrompt({ config, previousTurns: session.turns });
 
   const abortController = new AbortController();
   const { options, activeModel } = buildSdkOptions(
     chatId,
     abortController,
-    params.model,
+    params.model.id,
   );
 
   const prompt = formatUserPrompt({
@@ -126,12 +137,12 @@ export async function handleMessage(
   log("agent", `[${chatId}] <- (${text.length} chars)`);
   traceMessage(chatId, "in", text, { senderName, isGroup });
 
+  yield { type: "run_started" };
+
   const qi = query({ prompt, options });
   activeQueries.set(chatId, qi);
   const state = createStreamState();
 
-  // Post-result watchdog (see top-of-file). Armed inside the loop when the
-  // first `result` message lands; disarmed in `finally` either way.
   let postResultTimer: ReturnType<typeof setTimeout> | null = null;
   let postResultForceClosed = false;
   const armPostResultWatchdog = (): void => {
@@ -148,9 +159,6 @@ export async function handleMessage(
       } catch {
         /* abort() can throw if already aborted — ignore */
       }
-      // `qi.return()` resolves the async generator with `{ done: true }`,
-      // exiting the for-await loop without throwing. Combined with abort()
-      // above, the SDK subprocess gets torn down AND our loop releases.
       qi.return(undefined).catch(() => {
         /* the generator may already be in a terminal state — ignore */
       });
@@ -159,16 +167,6 @@ export async function handleMessage(
     postResultTimer = t;
   };
 
-  // Capture text args from delivery tools (`end_turn`, `send(type="text")`)
-  // so the end-of-turn trailing-text fallback can dedupe against content
-  // already delivered. Without this, a model that writes prose AND calls a
-  // delivery tool with similar text would surface twice in the chat.
-  //
-  // Tool names arrive MCP-prefixed (e.g. `mcp__telegram-tools__end_turn`)
-  // when routed through MCP — strip the prefix so equality checks match
-  // the registry's bare names.
-  // `captureDeliveredText` (from shared/) returns the normalized text
-  // norm — push it into state for the post-turn dedup check.
   const captureIntoState = (
     toolName: string,
     input: Record<string, unknown>,
@@ -177,117 +175,97 @@ export async function handleMessage(
     if (norm) state.deliveredTextNorms.push(norm);
   };
 
+  let propagateError: AgentEvent | null = null;
   try {
     for await (const message of qi) {
-      // Session ID capture
       if (isSystemInit(message)) {
         state.newSessionId = message.session_id;
         continue;
       }
 
-      // Stream text deltas and thinking deltas
       if (isStreamEvent(message)) {
-        processStreamDelta(message, state, onStreamDelta);
+        const emit = processStreamDelta(message, state);
+        if (emit) {
+          if (emit.phase === "text") {
+            yield { type: "text_delta", text: emit.text };
+          } else {
+            yield { type: "reasoning", text: emit.text };
+          }
+        }
         continue;
       }
 
-      // Complete assistant message — extract text blocks and tool calls
       if (isAssistant(message)) {
         const result = processAssistantMessage(message, state);
-
-        // Track the trailing text from this assistant message. Multiple
-        // assistant messages can fire per turn (one per tool-use round-trip);
-        // only the LAST one's trailingText is the user-facing final reply.
         state.lastTrailingText = result.trailingText;
 
-        // Notify tool usage + capture delivery-tool text for end-of-turn dedup
+        // Emit progress text segments BEFORE the tool calls they
+        // precede, so a model that says "let me check…" then calls a
+        // tool delivers the explanatory text first.
+        for (const progress of result.progressTexts) {
+          yield { type: "assistant_message", text: progress };
+        }
+
         for (const tool of result.tools) {
           incrementCounter(`tool_calls.${stripMcpPrefix(tool.name)}`);
           captureIntoState(tool.name, tool.input);
-          // Pass tool.input so the soft-terminator opt-out (e.g. react
-          // with `end_turn: false`) keeps state.turnTerminated correctly
-          // false — otherwise the trailing-text dedup path mis-treats a
-          // mid-turn react as the final delivery.
           if (isTurnTerminator(tool.name, tool.input)) {
             state.turnTerminated = true;
           }
-          if (onToolUse) {
-            try {
-              onToolUse(tool.name, tool.input);
-            } catch (err) {
-              logWarn(
-                "agent",
-                `onToolUse callback threw for ${tool.name}: ${err instanceof Error ? err.message : err}`,
-              );
-            }
-          }
+          yield {
+            type: "tool_call",
+            id: `${tool.name}-${Date.now()}-${Math.random()
+              .toString(36)
+              .slice(2, 8)}`,
+            name: tool.name,
+            input: tool.input,
+          };
         }
-
-        // Send progress text segments (text before each tool call) in order
-        if (onTextBlock) {
-          for (const text of result.progressTexts) {
-            try {
-              await onTextBlock(text);
-            } catch {
-              /* non-fatal — don't abort the stream loop */
-            }
-          }
-        }
-
-        // Turn-terminator detection happens here (sets `state.turnTerminated`
-        // for the flow-violation check below) but the actual SDK loop exit
-        // is owned by the `PostToolBatch` hook in `options.ts`. The hook
-        // fires after every tool in the batch has resolved, returns
-        // `{ continue: false }`, and the SDK exits with TerminalReason
-        // `'hook_stopped'` — no extra "wrap up after end_turn" round-trip,
-        // no phantom typing, no token spend on a stop_turn.
-        //
-        // Historical note: an earlier implementation called `qi.interrupt()`
-        // here directly. That raced with in-flight MCP tool dispatches in
-        // the same assistant message — `end_turn` itself is an MCP tool,
-        // and the model frequently emits sibling tool_use blocks alongside
-        // it. `interrupt()` cancelled their AbortController mid-flight,
-        // surfacing as `MCP error -32001: AbortError` and bubbling up as
-        // "Something went wrong". The `PostToolBatch` hook avoids the race
-        // by definition (it fires once the entire batch has resolved).
         continue;
       }
 
-      // Final result — read token counts and context info
       if (isResult(message)) {
         processResultMessage(message, state, options.model ?? activeModel);
-        // Arm the watchdog the moment we see `result`. On a clean SDK exit
-        // the iterator closes within milliseconds and the timer never fires;
-        // on a hang the timer aborts the controller and force-closes the
-        // generator after the grace window.
         armPostResultWatchdog();
       }
     }
   } catch (err) {
-    // Our own watchdog force-closed the iterator after the SDK stalled
-    // post-result. The work is already done — the result message was
-    // processed, the response was delivered via the delivery tool, and
-    // `state` is fully populated. Treat the abort as a clean exit so the
-    // post-loop code runs and frees the dispatcher lock.
     if (!postResultForceClosed) {
-      const outcome = await applyRetryDecision({
+      const buildRetryStream = (
+        fallbackModelId?: string,
+      ): AsyncIterable<AgentEvent> =>
+        runChatTurn(
+          fallbackModelId
+            ? {
+                ...params,
+                model: makeBareModelRef(
+                  params.model.backend,
+                  fallbackModelId,
+                  "fallback",
+                ),
+              }
+            : params,
+          { ..._internal, errorRetried: true },
+        );
+      const { retried, classified } = yield* applyRetryDecisionStream({
         err,
         chatId,
         activeModel,
         retried: _internal.errorRetried ?? false,
-        params,
-        recurseWithRetried: (p) =>
-          handleMessage(p, {
-            ..._internal,
-            errorRetried: true,
-          }),
-        // No backendLabel — historical claude-sdk log shape was un-prefixed
-        // (just `[chatId] session_expired, resetting…`). Preserving that.
+        buildRetryStream,
+        // No backendLabel — historical claude-sdk log shape was un-prefixed.
       });
-      if (outcome.retry) return outcome.retry;
-
-      logError("agent", `[${chatId}] SDK error: ${outcome.classified.message}`);
-      throw outcome.classified;
+      if (retried) {
+        // The recursive stream already yielded its own usage + completed.
+        return;
+      }
+      logError("agent", `[${chatId}] SDK error: ${classified.message}`);
+      // Defer the actual yield until after the `finally` cleanup runs so the
+      // watchdog timer and activeQueries entry are released first.
+      propagateError = {
+        type: "error",
+        error: classifiedToAgentError(classified),
+      };
     }
   } finally {
     if (postResultTimer) {
@@ -299,17 +277,17 @@ export async function handleMessage(
     }
   }
 
+  if (propagateError) {
+    yield propagateError;
+    return;
+  }
+
   // ── Persist session and usage ─────────────────────────────────────────────
 
   const durationMs = Date.now() - t0;
   recordHistogram("response_latency_ms", durationMs);
   incrementCounter("queries_total");
   if (state.newSessionId) setSessionId(chatId, state.newSessionId);
-  // Token usage is recorded for THIS attempt unconditionally — the running
-  // session totals are additive, so a flow-violation retry that recurses
-  // through this same path will record its own tokens on top. The turn
-  // counter, in contrast, must only increment ONCE per user message (see
-  // the post-violation block below).
   recordUsage(chatId, {
     inputTokens: state.sdkInputTokens,
     outputTokens: state.sdkOutputTokens,
@@ -331,16 +309,7 @@ export async function handleMessage(
   }
 
   // ── Trailing-prose contract + flow-violation retry ──────────────────────
-  // The output stream is private scratchpad by design. Final replies must go
-  // through `end_turn` (canonical) or `send` (mid-turn rich content). The
-  // shared `detectFlowViolation` decides whether trailing prose constitutes
-  // a missed delivery (and whether to re-prompt the model once with the
-  // synthetic reminder).
-  //
-  // `incrementTurns` is deferred until AFTER this check so the retry path
-  // (which recurses through `handleMessage` and hits its own
-  // `incrementTurns` at the end of that call) doesn't double-count a
-  // single user message as two turns.
+
   const violation = detectFlowViolation({
     trailingText: state.lastTrailingText,
     turnTerminated: state.turnTerminated,
@@ -364,15 +333,14 @@ export async function handleMessage(
 
     if (violation.shouldRetry) {
       incrementCounter("scratchpad.flow_violation_retried");
-      // The recursive call owns the `incrementTurns` for this user message.
-      // We deliberately don't increment here.
-      return handleMessage(
+      yield* runChatTurn(
         { ...params, text: violation.reminder },
         {
           ..._internal,
           flowRetries: (_internal.flowRetries ?? 0) + 1,
         },
       );
+      return;
     }
     incrementCounter("scratchpad.flow_violation_cap_exhausted");
   }
@@ -380,7 +348,7 @@ export async function handleMessage(
   // Reached the non-retry path — this turn counts as one user-visible turn.
   incrementTurns(chatId);
 
-  // ── Build result ──────────────────────────────────────────────────────────
+  // ── Build result events ──────────────────────────────────────────────────
 
   state.allResponseText += state.currentBlockText;
 
@@ -406,12 +374,21 @@ export async function handleMessage(
     model: activeModel,
   });
 
-  return {
-    text: state.allResponseText.trim(),
-    durationMs,
+  const usage = {
     inputTokens: state.sdkInputTokens,
     outputTokens: state.sdkOutputTokens,
     cacheRead: state.sdkCacheRead,
     cacheWrite: state.sdkCacheWrite,
+    modelId: activeModel,
+  };
+  yield { type: "usage", usage };
+  yield {
+    type: "completed",
+    result: {
+      text: state.allResponseText.trim(),
+      durationMs,
+      usage,
+      modelId: activeModel,
+    },
   };
 }

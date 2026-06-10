@@ -1,0 +1,184 @@
+/**
+ * Adapter helper for backends whose SDKs deliver chat-turn events via
+ * callbacks (Codex, OpenCode, Kilo, OpenAI Agents). The backend's
+ * `handler.ts` keeps its internal callback-driven loop, and its
+ * `runChatTurn.ts` calls this helper to expose the native
+ * `AsyncIterable<AgentEvent>` surface that `ChatBackend.runChatTurn`
+ * requires.
+ *
+ * Backends with native event emission (Claude SDK, post-conversion)
+ * skip this entirely and yield events directly — `runChatTurn` lives
+ * in the backend module and owns its own stream surface.
+ *
+ * Replaces the historical `to-event-stream.ts` shim that lived under
+ * "shared". The reframing matters: this is not a "legacy adapter,"
+ * it's the canonical bridge between an SDK that emits via callbacks
+ * and the `AgentEvent` contract every consumer reads.
+ */
+
+import {
+  type AgentEvent,
+  classifiedToAgentError,
+} from "../../core/agent-runtime/events.js";
+import { classify } from "../../core/errors.js";
+import type { ChatRunParams } from "../../core/agent-runtime/capabilities.js";
+import type { QueryParams, QueryResult } from "./handler-types.js";
+
+const SENTINEL = Symbol("handler-to-events:sentinel");
+
+type QueueEvent = AgentEvent | typeof SENTINEL;
+
+/**
+ * Drive a callback-shaped `handleMessage(QueryParams) => Promise<QueryResult>`
+ * and yield its events as `AgentEvent`s. The generator interleaves
+ * callback-driven streaming events with the awaited query result:
+ *
+ *   run_started → text_delta* → assistant_message* → tool_call* →
+ *     usage → completed
+ *
+ * On error: `run_started → error`.
+ *
+ * The wrapper builds the backend-internal `QueryParams` shape from
+ * the canonical `ChatRunParams` (`ModelRef` flattens to `model.id`;
+ * the queue owns the streaming surface — no callbacks come from
+ * the caller). Each backend's `runChatTurn.ts` invokes this once
+ * per chat turn.
+ */
+export async function* handlerToEvents(
+  handler: (params: QueryParams) => Promise<QueryResult>,
+  params: ChatRunParams,
+): AsyncIterable<AgentEvent> {
+  yield { type: "run_started" };
+
+  const queue: QueueEvent[] = [];
+  let resolveAvailable: (() => void) | null = null;
+  const wait = () =>
+    new Promise<void>((resolve) => {
+      resolveAvailable = resolve;
+    });
+  const emit = (event: QueueEvent): void => {
+    queue.push(event);
+    const r = resolveAvailable;
+    resolveAvailable = null;
+    r?.();
+  };
+
+  // Handler `onStreamDelta` delivers the FULL accumulated text so far,
+  // not the new chunk. `AgentEvent.text_delta.text` carries the delta —
+  // the bridge consumer (`pipeEventsToCallbacks`) re-accumulates. The
+  // wrapper tracks the prior accumulated value and emits only the
+  // trailing slice.
+  let lastAccumulated = "";
+
+  const handlerParams: QueryParams = {
+    chatId: params.chatId,
+    model: params.model.id,
+    text: params.text,
+    senderName: params.senderName,
+    isGroup: params.isGroup,
+    messageId: params.messageId,
+    onStreamDelta: (accumulated) => {
+      if (typeof accumulated !== "string" || accumulated.length === 0) {
+        return;
+      }
+      let chunk = accumulated;
+      if (accumulated.startsWith(lastAccumulated)) {
+        chunk = accumulated.slice(lastAccumulated.length);
+      }
+      lastAccumulated = accumulated;
+      if (chunk.length > 0) {
+        emit({ type: "text_delta", text: chunk });
+      }
+    },
+    onTextBlock: async (text) => {
+      await new Promise<void>((resolve, reject) => {
+        emit({
+          type: "assistant_message",
+          text,
+          deliveryAck: { resolve, reject },
+        });
+      });
+      // A block delivery anchors the accumulator — subsequent streaming
+      // deltas restart from empty.
+      lastAccumulated = "";
+    },
+    onToolUse: (toolName, input) => {
+      emit({
+        type: "tool_call",
+        id: `${toolName}-${Date.now()}-${Math.random()
+          .toString(36)
+          .slice(2, 8)}`,
+        name: toolName,
+        input,
+      });
+    },
+  };
+
+  let result: QueryResult | undefined;
+  let error: unknown;
+
+  const handlerPromise = handler(handlerParams)
+    .then((r) => {
+      result = r;
+    })
+    .catch((err) => {
+      error = err;
+    })
+    .finally(() => {
+      emit(SENTINEL);
+    });
+
+  // Drain the queue until the handler settles AND no more events are
+  // buffered. The sentinel only signals "handler settled" — we still
+  // flush any final text/tool events emitted just before resolution.
+  let settled = false;
+  while (!settled || queue.length > 0) {
+    while (queue.length > 0) {
+      const ev = queue.shift()!;
+      if (ev === SENTINEL) {
+        settled = true;
+        continue;
+      }
+      yield ev;
+    }
+    if (!settled) {
+      await wait();
+    }
+  }
+  await handlerPromise;
+
+  if (error) {
+    yield { type: "error", error: classifiedToAgentError(classify(error)) };
+    return;
+  }
+
+  if (!result) {
+    yield {
+      type: "error",
+      error: {
+        kind: "unknown",
+        message: "handler resolved without a result.",
+        retryable: false,
+      },
+    };
+    return;
+  }
+
+  const usage = {
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    cacheRead: result.cacheRead,
+    cacheWrite: result.cacheWrite,
+    modelId: params.model.id,
+  };
+  yield { type: "usage", usage };
+  yield {
+    type: "completed",
+    result: {
+      text: result.text,
+      durationMs: result.durationMs,
+      usage,
+      modelId: params.model.id,
+    },
+  };
+}

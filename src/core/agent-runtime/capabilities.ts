@@ -1,163 +1,168 @@
 /**
  * Backend capability interfaces.
  *
- * The current `QueryBackend` is a fat optional interface — every
- * method is `?:`, so callers can't tell at the type level which
- * backends actually implement which capabilities. The fix is to
- * split the interface into smaller orthogonal capabilities and
- * compose them on a `Backend` object that names what it does.
+ * Every backend factory builds and returns a `Backend` — a composed
+ * object whose capability slots cover the orthogonal pieces a
+ * production frontend / dispatcher needs:
  *
- *   - `ChatBackend.runChatTurn`         — primary turn loop
- *   - `BackgroundRunner.runBackgroundTask` — heartbeat / dream
- *   - `ModelCatalog`                     — resolution + listing
- *   - `SessionBackend`                   — reset + warm
- *   - `ToolRuntime`                      — hot MCP refresh
- *   - `UsageTelemetry`                   — `/status` enrichment
+ *   - `chat`        — chat-turn surface (`runChatTurn`)
+ *   - `background`  — heartbeat / dream / trigger background tasks
+ *   - `models`      — catalog (resolve / list / picker / providers)
+ *   - `sessions`    — reset / warm
+ *   - `tools`       — hot MCP refresh
+ *   - `usage`       — `/status` enrichment
+ *   - `control`     — system-prompt update
  *
- * Phase 1 only defines the types and a thin adapter
- * (`adapter.ts`) that wraps the existing `QueryBackend` into a
- * `Backend` so callers can begin migrating. The actual streaming
- * implementation lands in Phase 3.
+ * Consumers read through slots — `backend.chat?.runChatTurn(...)`,
+ * `backend.models?.resolveModelInfo(...)`. Capability presence IS the
+ * slot: an absent (`undefined`) slot means the backend doesn't
+ * support that capability. There is no separate flag record to keep
+ * in sync — the slots are the single source of truth.
  */
 
 import type { AgentEvent } from "./events.js";
 import type { ModelRef, BackendId } from "./model-ref.js";
-import type { RunPolicy } from "./run-policy.js";
+import type {
+  CacheMetricsSupport,
+  ModelPickerOptions,
+  ModelPickerResult,
+  OneShotAgentParams,
+  UnifiedModelInfo,
+  UnifiedModelResolution,
+  UnifiedProviderInfo,
+} from "../types.js";
 
 // ── Run parameters ──────────────────────────────────────────────────────────
 
 /**
- * Parameters for a chat turn. Mirrors the legacy `QueryParams`
- * shape with two additions:
- *
- *   - `model` is a resolved `ModelRef`, not a naked string.
- *   - `policy` carries the operational contract.
- *
- * Streaming callbacks (`onStreamDelta`, `onTextBlock`,
- * `onToolUse`) are not part of this shape — Phase 3 backends emit
- * events instead. Phase 1 adapter glue (see `adapter.ts`) handles
- * the bridging.
+ * Parameters for a chat turn. `model` is a resolved `ModelRef`,
+ * carrying everything the backend needs to identify the model and
+ * render the resulting reply. Streaming callbacks aren't part of
+ * this shape — backends emit `AgentEvent`s.
  */
 export interface ChatRunParams {
   chatId: string;
   model: ModelRef;
-  policy: RunPolicy;
   text: string;
   senderName: string;
   isGroup?: boolean;
   /** Provider message ID. Telegram is numeric; Discord snowflakes are strings. */
   messageId?: number | string;
-  /** Aborts the run mid-flight (signal propagates to subprocesses). */
-  abortController?: AbortController;
-}
-
-/**
- * Parameters for a one-shot background task (heartbeat / dream /
- * trigger wake-up). Mirrors legacy `OneShotAgentParams` with the
- * structural-policy additions.
- */
-export interface BackgroundRunParams {
-  prompt: string;
-  systemPrompt: string;
-  workspace: string;
-  model: ModelRef;
-  policy: RunPolicy;
-  /** Sentinel for the bridge's chat-id routing (`"heartbeat"`, etc). */
-  contextLabel: string;
-  abortController: AbortController;
 }
 
 // ── Catalog types ───────────────────────────────────────────────────────────
 
-/**
- * Context for catalog resolution. The resolver may need to know
- * which chat is asking (chat-pinned overrides), which auth mode is
- * active (Codex API key vs ChatGPT OAuth), and whether free-tier
- * filtering is on.
- */
-export interface ModelResolveContext {
-  chatId?: string;
-  filter?: "all" | "free";
-}
-
-/**
- * Result of one resolve query — same shape as the existing
- * `UnifiedModelResolution`, expressed in terms of `ModelRef`.
- */
-export type ModelResolution =
-  | { kind: "exact"; model: ModelRef; storedValue: string }
-  | { kind: "ambiguous"; matches: ModelRef[] }
-  | { kind: "missing" };
-
-/**
- * Filter for catalog listing.
- */
-export interface ModelFilter {
-  /** Show only free-tier models. */
-  freeOnly?: boolean;
-  /** Show only models marked selectable. */
-  selectableOnly?: boolean;
-  /** Substring match against `id` or `displayName`. Case-insensitive. */
-  query?: string;
-}
-
-/**
- * Page of models from a backend's catalog. Total is the unpaginated
- * count after filter.
- */
-export interface ModelList {
-  models: ModelRef[];
-  total: number;
-}
-
 // ── Capability interfaces ───────────────────────────────────────────────────
 
 /**
- * The chat-turn surface. A backend that supports interactive chat
- * implements this. The returned stream emits `AgentEvent`s and
- * terminates with `completed` or `error`.
+ * The chat-turn surface. `runChatTurn` returns an
+ * `AsyncIterable<AgentEvent>` carrying per-token deltas, tool
+ * events, usage, and the terminator. Consumers that need
+ * callback-driven delivery (the dispatcher, frontend logging) use
+ * `pipeEventsToCallbacks` from `event-bridge.ts`; consumers that
+ * want the raw stream iterate it directly.
  */
 export interface ChatBackend {
   runChatTurn(params: ChatRunParams): AsyncIterable<AgentEvent>;
 }
 
 /**
- * The background-task surface. Heartbeat, dream, and trigger
- * wake-ups invoke this. Same event protocol as `ChatBackend` — the
- * difference is the `RunPolicy.kind`.
+ * The background-task surface. Heartbeat / dream / trigger wake-ups
+ * invoke this. Same event protocol as `ChatBackend`.
+ *
+ *   - `runOneShotAgent(params)` — accepts `OneShotAgentParams`
+ *     (with its `appendLog` callback) so the heartbeat / dream /
+ *     trigger log-file producers keep their direct write path.
+ *   - `evictOrphanSubprocesses(label)` — backends that spawn
+ *     per-run subprocesses (Claude SDK) implement this so a hung
+ *     run can be force-cleaned after the abort grace window.
  */
 export interface BackgroundRunner {
-  runBackgroundTask(params: BackgroundRunParams): AsyncIterable<AgentEvent>;
+  runOneShotAgent(params: OneShotAgentParams): Promise<void>;
+  evictOrphanSubprocesses?(contextLabel: string): Promise<{
+    found: number;
+    termed: number;
+    killed: number;
+  }>;
 }
 
 /**
- * Catalog operations. A backend with no catalog (Claude SDK on
- * model alias) returns a single-entry list from `listModels` and
- * a fixed canonical from `getDefaultModel`. Catalog-driven backends
- * (Kilo, OpenCode, OpenAI Agents on OpenRouter) implement the full
- * surface.
+ * Catalog operations, split into a small REQUIRED core (resolution:
+ * `resolveModelInfo` / `getDefaultModelId` / `getRawModelInfo`, which
+ * the dispatcher and `core/active-model.ts` depend on) and an OPTIONAL
+ * picker / catalog-browse surface. A fixed-model backend (Claude SDK
+ * on a model alias) can implement only the core and let the `/model`
+ * picker degrade gracefully; catalog-driven backends (Kilo, OpenCode,
+ * OpenAI Agents on OpenRouter) implement the full surface.
+ *
+ * The catalog speaks `UnifiedModelInfo` — the rich shape every
+ * backend's `models.ts` produces internally. `ModelRef` is only
+ * the resolver's output, an enriched routing identity.
+ * `core/active-model.ts` wraps catalog calls into refs for
+ * `/status` and `/model` display.
  */
 export interface ModelCatalog {
-  resolveModel(
-    query: string,
-    context: ModelResolveContext,
-  ): Promise<ModelResolution>;
-  listModels(filter: ModelFilter): Promise<ModelList>;
+  // ── Required core: resolution ───────────────────────────────────
   /**
-   * Canonical default — may be `null` for catalog-driven backends
-   * with no canonical (matches the contract on the legacy
-   * `getDefaultModel`).
+   * Backend-native resolve. Used by `core/active-model.ts` for the
+   * per-chat override validation and by the frontend's
+   * resolution-error formatter.
    */
-  getDefaultModel(context: ModelResolveContext): Promise<ModelRef | null>;
+  resolveModelInfo(query: string): Promise<UnifiedModelResolution>;
+  /**
+   * Canonical default returning the raw model id (or `null` /
+   * `undefined` for catalog-driven backends with no canonical).
+   */
+  getDefaultModelId():
+    | Promise<string | null | undefined>
+    | string
+    | null
+    | undefined;
+  /** Backend-native model lookup by id. */
+  getRawModelInfo(id: string): Promise<UnifiedModelInfo | undefined>;
+
+  // ── Optional picker / catalog-browse surface ────────────────────
+  // A fixed-model backend (no real catalog) omits these; the `/model`
+  // and `/settings` frontends degrade gracefully — no quick-pick, no
+  // provider browse — when a method is absent.
+  /** Quick-pick presentation for `/model` and `/settings`. */
+  getSettingsPresentation?(
+    activeModel: string,
+    options?: ModelPickerOptions,
+  ): Promise<ModelPickerResult>;
+  /** List of providers exposed by the backend's catalog. */
+  getProviders?(): Promise<UnifiedProviderInfo[]>;
+  /** Paginated model list scoped to one provider. */
+  getProviderModels?(
+    providerId: string,
+    page?: number,
+    pageSize?: number,
+  ): Promise<{ models: UnifiedModelInfo[]; total: number }>;
+  /** Format an error for an unresolvable / unavailable model. */
+  formatModelError?(query: string, resolution: UnifiedModelResolution): string;
+  /** Free-tier-or-all model list. */
+  listModels?(filter?: "free" | "all"): Promise<{
+    models: UnifiedModelInfo[];
+    total: number;
+  }>;
 }
 
 /**
- * Session lifecycle. Backends with in-process conversation memory
- * implement at least `resetChat`. `warmSession` is a cold-start
- * optimisation hint — backends can no-op.
+ * Session lifecycle. Both methods optional:
+ *
+ *   - `resetChat` — drop any in-process conversation memory the
+ *     backend holds for a chat. Required only for backends that
+ *     keep their own session abstraction in memory (OpenAI Agents
+ *     `MemorySession`); stateless backends omit it.
+ *   - `warmSession` — cold-start optimisation hint.
+ *
+ * The dispatcher / `/reset` flow always also calls
+ * `storage/sessions.ts:resetSession(chatId)` so the chat's stored
+ * session id is cleared regardless of which slot variant the backend
+ * provides.
  */
 export interface SessionBackend {
-  resetChat(chatId: string): void | Promise<void>;
+  resetChat?(chatId: string): void | Promise<void>;
   warmSession?(chatId: string): Promise<void>;
 }
 
@@ -182,58 +187,89 @@ export interface ToolRuntime {
  * (Codex, OpenAI Agents) implement this. Backends without a
  * per-session model (Claude SDK on a fresh subprocess per turn)
  * return `undefined`.
+ *
+ * The snapshot's `contextModelId` carries the resolved-this-turn
+ * model id when the SDK can surface it. Frontend `/status` reads
+ * it to disambiguate the displayed model from the configured one
+ * (e.g. when Codex falls back from `gpt-5-codex` to `gpt-5.5` on
+ * ChatGPT-OAuth).
  */
-import type { UsageSnapshot } from "./events.js";
-
 export interface UsageTelemetry {
-  getSessionSnapshot(sessionId: string): Promise<UsageSnapshot | undefined>;
+  getSessionSnapshot(sessionId: string): Promise<
+    | {
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheRead?: number;
+        cacheWrite?: number;
+        contextModelId?: string;
+      }
+    | undefined
+  >;
+}
+
+/**
+ * Process-level control surface. Plugin hot-reload pokes the
+ * system prompt through here; nothing else mutates backend state
+ * out-of-band of `runChatTurn`.
+ */
+export interface SystemControl {
+  /** Update the system prompt on the live backend config. */
+  updateSystemPrompt(prompt: string): void;
 }
 
 // ── Composed backend ────────────────────────────────────────────────────────
 
 /**
- * Capability flags — runtime introspection for callers that want
- * to know what a backend supports before calling.
- */
-export interface BackendCapabilities {
-  chat: boolean;
-  background: boolean;
-  models: boolean;
-  sessions: boolean;
-  tools: boolean;
-  usage: boolean;
-}
-
-/**
  * Composed backend object. Missing capabilities are explicit
  * `undefined` slots, not optional methods on a fat interface.
+ *
+ * `cacheMetrics` lives at the top because every consumer reads it
+ * (status, dispatcher logging, telemetry); pushing it under
+ * `usage` would force `/status` to traverse a slot for one piece
+ * of metadata.
  */
 export interface Backend {
   id: BackendId;
   label: string;
-  capabilities: BackendCapabilities;
+  cacheMetrics: CacheMetricsSupport;
   chat?: ChatBackend;
   background?: BackgroundRunner;
   models?: ModelCatalog;
   sessions?: SessionBackend;
   tools?: ToolRuntime;
   usage?: UsageTelemetry;
+  control?: SystemControl;
 }
 
 /**
- * Derive `BackendCapabilities` from a partially-populated backend
- * object. Helper for adapter code that fills in slots
- * conditionally.
+ * Build a `Backend` from its slot components. A slot left out is a
+ * capability the backend doesn't support — consumers read presence
+ * directly (`backend.chat?.…`). The slot set is the single source of
+ * truth for what a backend can do; there's no derived flag record to
+ * keep in lockstep.
  */
-export function deriveCapabilities(
-  partial: Omit<Backend, "id" | "label" | "capabilities">,
-): BackendCapabilities {
+export function composeBackend(input: {
+  id: BackendId;
+  label: string;
+  cacheMetrics?: CacheMetricsSupport;
+  chat?: ChatBackend;
+  background?: BackgroundRunner;
+  models?: ModelCatalog;
+  sessions?: SessionBackend;
+  tools?: ToolRuntime;
+  usage?: UsageTelemetry;
+  control?: SystemControl;
+}): Backend {
   return {
-    chat: Boolean(partial.chat),
-    background: Boolean(partial.background),
-    models: Boolean(partial.models),
-    sessions: Boolean(partial.sessions),
-    tools: Boolean(partial.tools),
-    usage: Boolean(partial.usage),
+    id: input.id,
+    label: input.label,
+    cacheMetrics: input.cacheMetrics ?? "none",
+    chat: input.chat,
+    background: input.background,
+    models: input.models,
+    sessions: input.sessions,
+    tools: input.tools,
+    usage: input.usage,
+    control: input.control,
   };
 }

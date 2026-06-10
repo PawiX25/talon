@@ -1,25 +1,10 @@
 /**
- * `JsonStore<T>` — unified persistence for the six JSON-backed
- * stores under `src/storage/`.
+ * `JsonStore<T>` — unified persistence for every JSON-backed store
+ * under `src/storage/`.
  *
- * Phase 6 of the architecture unification plan. The six current
- * stores (`chat-settings`, `cron-store`, `history`, `media-index`,
- * `sessions`, `trigger-store`) each reimplement the same shape:
- *
- *   - in-memory `Map` mirror
- *   - dirty flag + 10s autosave
- *   - `write-file-atomic` on save
- *   - `.bak` fallback on corrupt read
- *   - debounced writes during high-frequency mutations
- *
- * That's ~1.5k LOC of duplicated code with ~80% structural overlap.
- * This module provides the storage primitive; the per-store
- * migrations land in Phase 6.x PRs.
- *
- * Phase 1-2 contract: **no production store uses `JsonStore` yet.**
- * The plan recommends starting with Codex OAuth incompat learning
- * (low-risk, small state) and ending with chat-settings (high-risk,
- * operationally sensitive).
+ * All seven JSON-backed stores (`chat-settings`, `cron-store`,
+ * `history`, `media-index`, `sessions`, `trigger-store`, plus codex
+ * `oauth-incompat`) are backed by this primitive.
  *
  * Design notes
  * ────────────
@@ -31,55 +16,68 @@
  *   - `schemaVersion` + `migrate` hook lets consumers evolve the
  *     shape without forking storage code per-store.
  *
- *   - Corrupt JSON falls back to `<path>.bak` once before
- *     surrendering. Matches the existing stores' behaviour.
+ *   - Each write first copies the existing primary to `<path>.bak`,
+ *     so a primary that later goes corrupt falls back to the previous
+ *     good copy on the next load. Matches the legacy stores' behaviour.
  *
  *   - Writes are atomic via `write-file-atomic` (rename-on-fsync).
  *     The store doesn't lock — concurrent processes mutating the
  *     same file is a separate problem (Talon assumes single-process
  *     ownership of `~/.talon/data/*`).
  *
- *   - Test-friendly: `JsonStoreOptions.now` and
- *     `JsonStoreOptions.fs` let tests inject a fake filesystem +
- *     clock without monkey-patching `node:fs`.
+ *   - Sync + async twin pairs: `load`/`loadSync`, `save`/`saveSync`.
+ *     The sync variants are required by stores wired into bootstrap
+ *     and `cleanup-registry` where the event loop hasn't drained
+ *     yet and the in-memory state must be primed before the first
+ *     synchronous read.
  *
- * Phase 6.x will migrate stores one at a time:
- *
- *   1. Codex OAuth incompat learning  (~150 LOC store, low risk)
- *   2. media index                    (~200 LOC store)
- *   3. cron jobs                      (~400 LOC store)
- *   4. triggers                       (~500 LOC store)
- *   5. sessions                       (~300 LOC store)
- *   6. chat settings                  (~400 LOC store, last — touch
- *                                       prod state too directly to
- *                                       migrate first)
+ *   - Test-friendly: `JsonStoreOptions.now` and `JsonStoreOptions.fs`
+ *     let tests inject a fake filesystem + clock without
+ *     monkey-patching `node:fs`.
  */
 
-import { existsSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import writeFileAtomic from "write-file-atomic";
 
 /**
  * Subset of the `node:fs` surface this module uses. Tests can
  * inject an in-memory implementation; production uses the default
  * (passes through to `node:fs`).
+ *
+ * `writeFileAtomicSync` is optional — async-only fakes (tests that
+ * never call `saveSync`) can omit it. Stores that want a synchronous
+ * persistence path (storage modules wired into cleanup-registry
+ * before the event loop drains) require it.
  */
 export interface JsonStoreFs {
   existsSync(path: string): boolean;
   readFileSync(path: string, encoding: "utf8"): string;
   writeFileAtomic(path: string, data: string): Promise<void>;
+  writeFileAtomicSync?(path: string, data: string): void;
   renameSync(from: string, to: string): void;
   unlinkSync(path: string): void;
 }
 
+/**
+ * Default `JsonStoreFs` over `node:fs`. The `node:fs` accesses are
+ * lazy (looked up on the namespace object at call time rather than
+ * destructured at module load) so test files can mock a subset of
+ * the fs surface without crashing JsonStore's import. The full
+ * surface (`existsSync`, `readFileSync`, `renameSync`, `unlinkSync`,
+ * plus `writeFileAtomic` for primary writes) is only exercised by
+ * stores that go to disk; tests that never hit those code paths can
+ * safely omit the corresponding mock entries.
+ */
 const defaultFs: JsonStoreFs = {
-  existsSync,
-  readFileSync: (path) => readFileSync(path, "utf8"),
+  existsSync: (path) => nodeFs.existsSync(path),
+  readFileSync: (path) => nodeFs.readFileSync(path, "utf8"),
   writeFileAtomic: (path, data) =>
     new Promise((resolve, reject) => {
       writeFileAtomic(path, data, (err) => (err ? reject(err) : resolve()));
     }),
-  renameSync,
-  unlinkSync,
+  writeFileAtomicSync: (path, data) => writeFileAtomic.sync(path, data),
+  renameSync: (from, to) => nodeFs.renameSync(from, to),
+  unlinkSync: (path) => nodeFs.unlinkSync(path),
 };
 
 /**
@@ -181,6 +179,21 @@ export class JsonStore<T> {
    * re-reading.
    */
   async load(): Promise<T> {
+    return this.loadSync();
+  }
+
+  /**
+   * Synchronous variant of `load`. Used by storage modules wired
+   * into bootstrap / cleanup-registry where the event loop hasn't
+   * drained yet and the in-memory state must be primed before the
+   * first synchronous read.
+   *
+   * Both `load` and `loadSync` walk the same `<path>` → `<path>.bak`
+   * → `defaultValue` ladder. The async form is preserved for callers
+   * that want to opt into a fake fs whose `readFileSync` is async-
+   * backed.
+   */
+  loadSync(): T {
     if (this.#loaded) return this.#value;
     const fromPrimary = this.#tryReadFile(this.#path);
     if (fromPrimary.ok) {
@@ -253,13 +266,28 @@ export class JsonStore<T> {
    */
   async save(): Promise<void> {
     if (!this.#dirty) return;
-    const envelope: Envelope<T> = {
-      schemaVersion: this.#schemaVersion,
-      savedAt: this.#now(),
-      data: this.#value,
-    };
-    const serialised = JSON.stringify(envelope, null, 2);
+    const serialised = this.#serialise();
+    await this.#backupExistingPrimary();
     await this.#fs.writeFileAtomic(this.#path, serialised);
+    this.#dirty = false;
+  }
+
+  /**
+   * Synchronous save variant. Required by stores wired into
+   * cleanup-registry shutdown hooks where the event loop is about
+   * to terminate. The injected fs must implement
+   * `writeFileAtomicSync` — async-only fakes throw.
+   */
+  saveSync(): void {
+    if (!this.#dirty) return;
+    if (!this.#fs.writeFileAtomicSync) {
+      throw new Error(
+        "JsonStore.saveSync: injected fs does not implement writeFileAtomicSync",
+      );
+    }
+    const serialised = this.#serialise();
+    this.#backupExistingPrimarySync();
+    this.#fs.writeFileAtomicSync(this.#path, serialised);
     this.#dirty = false;
   }
 
@@ -273,6 +301,15 @@ export class JsonStore<T> {
     await this.save();
   }
 
+  #serialise(): string {
+    const envelope: Envelope<T> = {
+      schemaVersion: this.#schemaVersion,
+      savedAt: this.#now(),
+      data: this.#value,
+    };
+    return JSON.stringify(envelope, null, 2);
+  }
+
   /**
    * Forget the in-memory state and force a fresh read on the next
    * `load()`. Test-only utility.
@@ -284,6 +321,36 @@ export class JsonStore<T> {
   }
 
   // ── Internals ───────────────────────────────────────────────────────────
+
+  /**
+   * Copy the current on-disk primary to `<path>.bak` before it is
+   * overwritten, so a primary that later goes corrupt (a torn write
+   * from an external cause, a bad disk sector, a manual edit) can
+   * still recover the previous good copy via the `loadSync` fallback
+   * ladder. Best-effort: a backup failure must never block — or
+   * mask the error of — the primary write that follows.
+   */
+  async #backupExistingPrimary(): Promise<void> {
+    if (!this.#fs.existsSync(this.#path)) return;
+    try {
+      const current = this.#fs.readFileSync(this.#path, "utf8");
+      await this.#fs.writeFileAtomic(this.#path + ".bak", current);
+    } catch {
+      // Best effort — see doc comment.
+    }
+  }
+
+  /** Synchronous twin of `#backupExistingPrimary`. */
+  #backupExistingPrimarySync(): void {
+    if (!this.#fs.writeFileAtomicSync) return;
+    if (!this.#fs.existsSync(this.#path)) return;
+    try {
+      const current = this.#fs.readFileSync(this.#path, "utf8");
+      this.#fs.writeFileAtomicSync(this.#path + ".bak", current);
+    } catch {
+      // Best effort — see doc comment.
+    }
+  }
 
   #tryReadFile(path: string): { ok: true; value: T } | { ok: false } {
     if (!this.#fs.existsSync(path)) return { ok: false };

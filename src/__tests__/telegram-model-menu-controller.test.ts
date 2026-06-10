@@ -39,11 +39,9 @@ vi.mock("../util/log.js", () => ({
   logDebug: vi.fn(),
 }));
 
-import type {
-  QueryBackend,
-  ModelPickerResult,
-  UnifiedModelInfo,
-} from "../core/types.js";
+import type { ModelPickerResult, UnifiedModelInfo } from "../core/types.js";
+import type { Backend } from "../core/agent-runtime/capabilities.js";
+import { stubBackend } from "./helpers/stub-backend.js";
 import {
   initBackendPool,
   rebindChat,
@@ -77,26 +75,35 @@ function makeFakeBackend(
   label: string,
   picker: ModelPickerResult,
   activeDisplay = "active",
-): QueryBackend {
-  return {
-    query: vi.fn(),
-    backendLabel: label,
-    getSettingsPresentation: vi.fn().mockResolvedValue(picker),
-    getModelInfo: vi.fn().mockResolvedValue({
-      id: "active-id",
-      displayName: activeDisplay,
-      provider: label,
-      providerName: label,
-      selectable: true,
-      reasoning: false,
-    } satisfies UnifiedModelInfo),
+): Backend {
+  const fakeModel: UnifiedModelInfo = {
+    id: "active-id",
+    displayName: activeDisplay,
+    provider: label,
+    providerName: label,
+    selectable: true,
+    reasoning: false,
   };
+  return stubBackend({
+    label,
+    query: vi.fn(),
+    getSettingsPresentation: vi.fn().mockResolvedValue(picker),
+    getModelInfo: vi.fn().mockResolvedValue(fakeModel),
+    // Mirror the model into resolveModel so per-chat override
+    // validation in `core/active-model.ts` accepts any stored id —
+    // these tests focus on the picker output, not the resolver.
+    resolveModel: vi.fn().mockResolvedValue({
+      kind: "exact" as const,
+      storedValue: fakeModel.id,
+      model: fakeModel,
+    }),
+  });
 }
 
 function makeFactory(
   id: string,
   label: string,
-  backend: QueryBackend,
+  backend: Backend,
 ): BackendFactory {
   return {
     id,
@@ -202,7 +209,7 @@ describe("model-menu / resolveBackendForChat", () => {
   it("falls back to the gateway's backend when the pool is uninitialised", () => {
     const c1 = freshChat();
     resetBackendPoolForTest();
-    const fallback = { backendLabel: "fallback" } as unknown as QueryBackend;
+    const fallback = stubBackend({ label: "fallback" });
     expect(resolveBackendForChat(c1, { backend: fallback })).toBe(fallback);
   });
 
@@ -236,14 +243,20 @@ describe("model-menu / buildModelMenuViewForChat", () => {
     await rebindChat(c1, "fake-openai-agents", baseConfig);
     // Reset call counts collected during prior tests / pool init.
     (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mockClear();
     (
-      claudeBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      claudeBackend.models!.getSettingsPresentation as ReturnType<typeof vi.fn>
     ).mockClear();
     await buildModelMenuViewForChat(c1, baseConfig);
-    expect(openrouterBackend.getSettingsPresentation).toHaveBeenCalledTimes(1);
-    expect(claudeBackend.getSettingsPresentation).not.toHaveBeenCalled();
+    expect(
+      openrouterBackend.models!.getSettingsPresentation,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      claudeBackend.models!.getSettingsPresentation,
+    ).not.toHaveBeenCalled();
   });
 
   it("reflects hasBackendOverride on the menu state", async () => {
@@ -260,11 +273,15 @@ describe("model-menu / buildModelMenuViewForChat", () => {
     await rebindChat(c1, "fake-openai-agents", baseConfig);
     setChatFreeOnly(c1, true);
     (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mockClear();
     await buildModelMenuViewForChat(c1, baseConfig);
     const args = (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mock.calls[0];
     expect(args[1]).toMatchObject({ filter: "free" });
   });
@@ -281,7 +298,7 @@ describe("model-menu / buildModelMenuViewForChat", () => {
       modelDetails: [],
       view: "models",
     });
-    stripped.getModelInfo = vi.fn().mockResolvedValue(undefined);
+    stripped.models!.getRawModelInfo = vi.fn().mockResolvedValue(undefined);
     registerBackend(makeFactory("fake-stripped", "Stripped", stripped));
     await rebindChat(c1, "fake-stripped", baseConfig);
     setChatModel(c1, "raw/model-id");
@@ -307,7 +324,9 @@ describe("model-menu / buildModelBrowseViewForChat", () => {
     const c1 = freshChat();
     await rebindChat(c1, "fake-openai-agents", baseConfig);
     (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mockClear();
     await buildModelBrowseViewForChat(c1, baseConfig, {
       filter: "free",
@@ -315,7 +334,9 @@ describe("model-menu / buildModelBrowseViewForChat", () => {
       provider: "openai",
     });
     const args = (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mock.calls[0];
     expect(args[1]).toMatchObject({
       filter: "free",
@@ -329,11 +350,15 @@ describe("model-menu / buildModelBrowseViewForChat", () => {
     await rebindChat(c1, "fake-openai-agents", baseConfig);
     setChatFreeOnly(c1, true);
     (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mockClear();
     await buildModelBrowseViewForChat(c1, baseConfig, {});
     const args = (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mock.calls[0];
     expect(args[1]).toMatchObject({ filter: "free" });
   });
@@ -343,11 +368,15 @@ describe("model-menu / buildModelBrowseViewForChat", () => {
     await rebindChat(c1, "fake-openai-agents", baseConfig);
     setChatFreeOnly(c1, true);
     (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mockClear();
     await buildModelBrowseViewForChat(c1, baseConfig, { filter: "all" });
     const args = (
-      openrouterBackend.getSettingsPresentation as ReturnType<typeof vi.fn>
+      openrouterBackend.models!.getSettingsPresentation as ReturnType<
+        typeof vi.fn
+      >
     ).mock.calls[0];
     expect(args[1]).toMatchObject({ filter: "all" });
   });

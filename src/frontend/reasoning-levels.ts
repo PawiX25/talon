@@ -1,21 +1,12 @@
-import type {
-  QueryBackend,
-  ReasoningEffortLevel,
-  UnifiedModelInfo,
-} from "../core/types.js";
+import type { ReasoningEffortLevel, UnifiedModelInfo } from "../core/types.js";
+import type { Backend } from "../core/agent-runtime/capabilities.js";
 import { resolveActiveModelForChat } from "../core/active-model.js";
 import type { TalonConfig } from "../util/config.js";
 import {
   normalizeReasoningLevels,
-  REASONING_LEVEL_DESCRIPTIONS,
-  REASONING_LEVEL_LABELS,
   supportsReasoningLevel,
 } from "../core/reasoning-levels.js";
-export {
-  REASONING_LEVEL_DESCRIPTIONS,
-  REASONING_LEVEL_LABELS,
-  supportsReasoningLevel,
-};
+export { supportsReasoningLevel };
 
 export type ActiveReasoningLevels = {
   activeModel: string | null;
@@ -33,7 +24,7 @@ export function displayReasoningEffort(
 
 export async function getActiveReasoningLevels(params: {
   chatId: string;
-  backend: QueryBackend | null;
+  backend: Backend | null;
   backendId: string | null;
   config: TalonConfig;
 }): Promise<ActiveReasoningLevels> {
@@ -45,7 +36,8 @@ export async function getActiveReasoningLevels(params: {
   );
   if (!activeModel) return { activeModel: null, levels: [] };
 
-  const modelInfo = await params.backend?.getModelInfo?.(activeModel);
+  const modelInfo =
+    await params.backend?.models?.getRawModelInfo?.(activeModel);
   const levels = normalizeReasoningLevels(modelInfo?.supportedReasoningLevels);
   return { activeModel, modelInfo, levels };
 }

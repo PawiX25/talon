@@ -9,12 +9,11 @@
  * longer render markdown logs themselves and core no longer parses
  * backend-specific output.
  *
- * Phase 1 (this PR) only adds the type. No backend emits these
- * events yet and no renderer consumes them yet — the
- * `QueryBackend → ChatBackend` adapter in `adapter.ts` produces a
- * minimal event sequence so callers can begin building against the
- * new shape. Real per-token streaming, tool-call events, and
- * reasoning blocks get wired in Phase 3.
+ * The shared wrapper `backend/shared/handler-to-events.ts` converts
+ * each backend's existing callback-driven `handleMessage` into the
+ * canonical sequence: `run_started → text_delta* →
+ * assistant_message* → tool_call* → usage → completed`. Backends
+ * with richer SDKs can emit events directly without the wrapper.
  *
  * Design notes
  * ────────────
@@ -40,14 +39,15 @@
  */
 
 import type { ReasoningEffortLevel } from "../types.js";
+import type { TalonError } from "../errors.js";
 
 /**
  * Token + cache counters for one backend run.
  *
  * `cacheRead` and `cacheWrite` are zero when the backend doesn't
- * support prompt caching (mapped from `cacheMetrics: "none"` on the
- * legacy interface). Tests should assert exact zero, not absence —
- * `JSON.stringify` round-trips drop `undefined` keys.
+ * support prompt caching (mapped from `Backend.cacheMetrics: "none"`).
+ * Tests should assert exact zero, not absence — `JSON.stringify`
+ * round-trips drop `undefined` keys.
  */
 export interface UsageSnapshot {
   inputTokens: number;
@@ -64,10 +64,9 @@ export interface UsageSnapshot {
 }
 
 /**
- * Final result of a backend run. Mirrors the shape of the legacy
- * `QueryResult`, with the addition of the runtime model id so
- * downstream consumers can render "Reply via gpt-5-codex (1.2s)"
- * without re-asking the resolver.
+ * Final result of a backend run — text + duration + usage + the
+ * runtime model id so downstream consumers can render "Reply via
+ * gpt-5-codex (1.2s)" without re-asking the resolver.
  */
 export interface AgentResult {
   /** Full assistant text (concatenated from any deltas / blocks). */
@@ -111,7 +110,22 @@ export interface AgentError {
 export type AgentEvent =
   | { type: "run_started"; runId?: string; sessionId?: string }
   | { type: "text_delta"; text: string }
-  | { type: "assistant_message"; text: string }
+  | {
+      type: "assistant_message";
+      text: string;
+      /**
+       * Optional delivery acknowledgement for callback-shaped backend
+       * adapters. When present, the event bridge resolves it after the
+       * frontend's async `onTextBlock` callback succeeds, or rejects it
+       * when delivery fails. That preserves the old `await onTextBlock`
+       * semantics for backends whose retry logic depends on delivery
+       * failures (notably Codex oversized-message retries).
+       */
+      deliveryAck?: {
+        resolve(): void;
+        reject(error: unknown): void;
+      };
+    }
   | {
       type: "reasoning";
       text: string;
@@ -178,5 +192,42 @@ export function addUsage(a: UsageSnapshot, b: UsageSnapshot): UsageSnapshot {
     cacheRead: a.cacheRead + b.cacheRead,
     cacheWrite: a.cacheWrite + b.cacheWrite,
     modelId: b.modelId ?? a.modelId,
+  };
+}
+
+/**
+ * The `core/errors.ts` reasons that map to a specific `AgentErrorKind`.
+ * Anything not listed collapses to `unknown`. `ErrorReason` is
+ * HTTP/transport-oriented (`network`, `bad_request`, `forbidden`) and
+ * `AgentErrorKind` is agent-run-oriented (`aborted`, `timeout`,
+ * `tool_failure`), so the two only partially overlap — adding a row
+ * here is the whole cost of teaching the boundary a new mapping.
+ */
+const REASON_TO_KIND: Partial<Record<TalonError["reason"], AgentErrorKind>> = {
+  rate_limit: "rate_limit",
+  overloaded: "overload",
+  context_length: "context_overflow",
+  session_expired: "session_expired",
+  auth: "auth",
+};
+
+/**
+ * Map a classified `TalonError` (from `core/errors.ts:classify`) onto
+ * the canonical `AgentError` every backend emits on its error path.
+ * `retryable` is ALWAYS carried through, because that — not `kind` — is
+ * what the dispatcher's retry path and the frontends' error handlers
+ * switch on.
+ *
+ * This is the single error→`AgentError` boundary: both the native
+ * Claude SDK handler and the callback wrapper (`handler-to-events.ts`)
+ * route through it, so every backend classifies identically instead of
+ * each re-implementing a message-substring guess.
+ */
+export function classifiedToAgentError(classified: TalonError): AgentError {
+  return {
+    kind: REASON_TO_KIND[classified.reason] ?? "unknown",
+    message: classified.message,
+    retryable: classified.retryable,
+    raw: classified.stack,
   };
 }

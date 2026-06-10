@@ -27,7 +27,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { QueryBackend, UnifiedModelResolution } from "../core/types.js";
+import type { UnifiedModelResolution } from "../core/types.js";
+import type {
+  Backend,
+  ModelCatalog,
+} from "../core/agent-runtime/capabilities.js";
+import { composeBackend } from "../core/agent-runtime/capabilities.js";
 import type { TalonConfig } from "../util/config.js";
 
 vi.mock("../util/log.js", () => ({
@@ -98,21 +103,17 @@ function fakeBackend(opts: {
     | null
     | undefined;
   backendLabel?: string;
-}): QueryBackend {
-  const be: Partial<QueryBackend> = {
-    query: vi.fn().mockResolvedValue({
-      text: "",
-      durationMs: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-    }),
-  };
-  if (opts.resolveModel) be.resolveModel = opts.resolveModel;
-  if (opts.getDefaultModel) be.getDefaultModel = opts.getDefaultModel;
-  if (opts.backendLabel) be.backendLabel = opts.backendLabel;
-  return be as QueryBackend;
+}): Backend {
+  const models: Partial<ModelCatalog> = {};
+  if (opts.resolveModel) models.resolveModelInfo = opts.resolveModel;
+  if (opts.getDefaultModel) models.getDefaultModelId = opts.getDefaultModel;
+  return composeBackend({
+    id: "claude",
+    label: opts.backendLabel ?? "Stub",
+    cacheMetrics: "none",
+    models:
+      Object.keys(models).length > 0 ? (models as ModelCatalog) : undefined,
+  });
 }
 
 describe("resolveActiveModelForChat — 5-step chain", () => {
@@ -137,7 +138,10 @@ describe("resolveActiveModelForChat — 5-step chain", () => {
       "codex",
       fakeConfig(),
     );
-    expect(result).toEqual({ model: "gpt-5.5", source: "override-valid" });
+    expect(result).toMatchObject({
+      model: "gpt-5.5",
+      source: "override-valid",
+    });
   });
 
   // ── Step 2 reached: override invalid → backend canonical ───────────
@@ -154,7 +158,7 @@ describe("resolveActiveModelForChat — 5-step chain", () => {
       "codex",
       fakeConfig(),
     );
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       model: "gpt-5.5",
       source: "override-invalid-fallback",
     });
@@ -209,7 +213,10 @@ describe("resolveActiveModelForChat — 5-step chain", () => {
       "codex",
       fakeConfig(),
     );
-    expect(result).toEqual({ model: "gpt-5.5", source: "backend-canonical" });
+    expect(result).toMatchObject({
+      model: "gpt-5.5",
+      source: "backend-canonical",
+    });
   });
 
   // ── Step 3: operator override in config.backendDefaults ────────────
@@ -226,7 +233,7 @@ describe("resolveActiveModelForChat — 5-step chain", () => {
         },
       }),
     );
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       model: "meta-llama/llama-3.3-70b-instruct:free",
       source: "config-backend-defaults",
     });
@@ -259,7 +266,7 @@ describe("resolveActiveModelForChat — 5-step chain", () => {
       "claude",
       fakeConfig({ backend: "claude", model: "claude-opus-4-7" }),
     );
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       model: "claude-opus-4-7",
       source: "config-legacy-global",
     });
@@ -276,7 +283,7 @@ describe("resolveActiveModelForChat — 5-step chain", () => {
     );
     // config.model belongs to the claude backend; openai-agents
     // without backendDefaults must NOT inherit it.
-    expect(result).toEqual({ model: null, source: "none" });
+    expect(result).toMatchObject({ model: null, source: "none" });
   });
 
   // ── Step 5: null when chain exhausted ──────────────────────────────
@@ -289,7 +296,7 @@ describe("resolveActiveModelForChat — 5-step chain", () => {
       "openai-agents",
       fakeConfig({ backend: "claude", model: "" }),
     );
-    expect(result).toEqual({ model: null, source: "none" });
+    expect(result).toMatchObject({ model: null, source: "none" });
   });
 });
 

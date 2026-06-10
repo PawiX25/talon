@@ -44,7 +44,6 @@ import {
 import { clearHistory } from "../../storage/history.js";
 import {
   getChatSettings,
-  setChatModel,
   setChatModelForBackend,
   setChatBackend,
   setChatEffort,
@@ -92,7 +91,7 @@ import {
   resolveChatBackend,
 } from "../../core/backend-controller.js";
 import { resolveActiveModelForChat } from "../../core/active-model.js";
-import { resolveActiveModelRefForChat } from "../../core/agent-runtime/resolver.js";
+
 import { log, logError, logWarn } from "../../util/log.js";
 import {
   suppressMentions,
@@ -579,8 +578,8 @@ async function handleReset(
   const chatBackend = resolveChatBackend(chatId, gateway?.backend);
   // Wipe any in-process backend memory (e.g. openai-agents'
   // MemorySession). Stateless backends ignore this.
-  chatBackend?.resetChat?.(chatId);
-  await chatBackend?.warmSession?.(chatId);
+  chatBackend?.sessions?.resetChat?.(chatId);
+  await chatBackend?.sessions?.warmSession?.(chatId);
   await reply(i, "Session cleared.", true);
 }
 
@@ -600,12 +599,12 @@ async function handleStatus(
   const chatSets = getChatSettings(chatId);
   const statusBe = resolveChatBackend(chatId, gateway?.backend);
   const statusBeId = getBackendIdForChat(chatId);
-  // Phase 2.2: consume the resolved ModelRef so context window + display
-  // name come from one enriched object. The ref resolver wraps the same
-  // 5-step chain as `resolveActiveModelForChat`, so the active model id
-  // is identical; the difference is one fewer round-trip to
-  // `getModelInfo` for the common case.
-  const { ref: statusModelRef } = await resolveActiveModelRefForChat(
+  // Consume the resolved `ModelRef` so context window + display name
+  // come from one enriched object. The ref resolver wraps the same
+  // 5-step chain as `resolveActiveModelForChat`, so the active model
+  // id is identical; the difference is one fewer round-trip to
+  // `getRawModelInfo` for the common case.
+  const { ref: statusModelRef } = await resolveActiveModelForChat(
     chatId,
     statusBe,
     statusBeId,
@@ -630,9 +629,9 @@ async function handleStatus(
   if (statusModelRef?.contextWindow) {
     ctxMax = ctxMax || statusModelRef.contextWindow;
   }
-  if (be?.getSessionSnapshot && info.sessionId) {
-    const snap = await be
-      .getSessionSnapshot(info.sessionId)
+  if (be?.usage?.getSessionSnapshot && info.sessionId) {
+    const snap = await be.usage
+      ?.getSessionSnapshot(info.sessionId)
       .catch(() => undefined);
     if (snap) {
       displayInputTokens = snap.inputTokens ?? displayInputTokens;
@@ -671,7 +670,7 @@ async function handleStatus(
   const diskBytes = getWorkspaceDiskUsage(config.workspace);
   const diskStr = formatBytes(diskBytes);
 
-  const backendLabel = be?.backendLabel ?? "";
+  const backendLabel = be?.label ?? "";
   const lines = [
     `**🦅 Talon** · \`${formatModelLabel(activeModel)}\`${backendLabel ? ` · *${backendLabel}*` : ""} · effort: ${effortName}`,
     "",
@@ -742,12 +741,12 @@ async function handleModel(
       await reply(i, msg, true);
       return;
     }
-    if (be?.getSettingsPresentation) {
-      const pres = await be.getSettingsPresentation(activeModel, {
+    if (be?.models?.getSettingsPresentation) {
+      const pres = await be.models?.getSettingsPresentation(activeModel, {
         callbackPrefix: "model:",
       });
       const modelInfo = activeModel
-        ? await be.getModelInfo?.(activeModel)
+        ? await be.models?.getRawModelInfo?.(activeModel)
         : undefined;
       const displayName =
         modelInfo?.displayName ??
@@ -780,11 +779,12 @@ async function handleModel(
     return;
   }
 
-  if (be?.resolveModel) {
-    const resolution = await be.resolveModel(arg);
+  if (be?.models?.resolveModelInfo) {
+    const resolution = await be.models?.resolveModelInfo(arg);
     if (resolution.kind !== "exact") {
       const msg =
-        be.formatModelError?.(arg, resolution) ?? `No model matched "${arg}".`;
+        be.models?.formatModelError?.(arg, resolution) ??
+        `No model matched "${arg}".`;
       await reply(i, msg, true);
       return;
     }
@@ -979,9 +979,10 @@ async function handleSettings(
   // `settingsBe` already resolved above for the activeModel lookup;
   // reuse it for the catalog snapshot. Pass the raw resolved id (or
   // empty string) — never the "No model selected" sentinel.
-  if (settingsBe?.getSettingsPresentation) {
+  if (settingsBe?.models?.getSettingsPresentation) {
     const presModelId = resolvedActive ?? "";
-    const presentation = await settingsBe.getSettingsPresentation(presModelId);
+    const presentation =
+      await settingsBe.models?.getSettingsPresentation(presModelId);
     modelDetails = presentation.modelDetails;
     modelButtons = presentation.modelButtons;
   }

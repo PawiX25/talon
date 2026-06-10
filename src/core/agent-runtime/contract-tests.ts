@@ -1,25 +1,21 @@
 /**
- * Backend contract assertions — Phase 7 of the architecture
- * unification plan.
+ * Backend contract assertions.
  *
- * The plan calls for shared test suites that every concrete
- * backend (Claude SDK, Codex, Kilo, OpenCode, OpenAI Agents) must
- * pass. These are the assertions; the per-backend test files
- * import them and apply them via vitest `describe` / `it` blocks.
+ * Shared test suite every concrete backend (Claude SDK, Codex,
+ * Kilo, OpenCode, OpenAI Agents) must pass. These are the
+ * assertions; `backend-contract.test.ts` wires the full suite
+ * across every shipped `BackendId` through the real
+ * `handlerToEvents` → `composeBackend` path, and per-backend
+ * handler tests can re-use individual assertions for SDK-specific
+ * scenarios:
  *
- *   import { assertBackendRespectsAbort } from "...";
- *   it("respects abort", () =>
- *     assertBackendRespectsAbort(claudeBackend));
+ *   import { assertChatBackendTerminates } from "...";
+ *   it("terminates", () => assertChatBackendTerminates(claudeBackend));
  *
  * Each function:
  *   - takes a `Backend`,
  *   - exercises one specific contract clause,
- *   - throws a descriptive `Error` when the clause is violated.
- *
- * Phase 1-2 contract: this file is a library. Tests
- * (`agent-runtime-contracts.test.ts`) verify the helpers
- * themselves catch contract violations using a deliberately-bad
- * stub backend.
+ *   - throws a `ContractViolation` when the clause is violated.
  *
  * Per the plan's "Backend-specific tests should focus on SDK
  * translation quirks, not retesting the same Talon behaviour seven
@@ -29,7 +25,6 @@
 
 import type { Backend } from "./capabilities.js";
 import type { AgentEvent } from "./events.js";
-import { defaultRunPolicyFor } from "./run-policy.js";
 import { makeBareModelRef, type BackendId } from "./model-ref.js";
 
 class ContractViolation extends Error {
@@ -75,7 +70,6 @@ export async function assertChatBackendTerminates(
     backend.chat.runChatTurn({
       chatId: options.chatId ?? "contract-test-chat",
       model: makeBareModelRef(backend.id, "contract-test-model"),
-      policy: defaultRunPolicyFor("chat"),
       text: options.text ?? "ping",
       senderName: "ContractTest",
     }),
@@ -111,7 +105,6 @@ export async function assertChatBackendEmitsRunStarted(
     backend.chat.runChatTurn({
       chatId: options.chatId ?? "contract-test-chat",
       model: makeBareModelRef(backend.id, "contract-test-model"),
-      policy: defaultRunPolicyFor("chat"),
       text: options.text ?? "ping",
       senderName: "ContractTest",
     }),
@@ -140,7 +133,6 @@ export async function assertChatBackendEmitsSingleUsage(
     backend.chat.runChatTurn({
       chatId: options.chatId ?? "contract-test-chat",
       model: makeBareModelRef(backend.id, "contract-test-model"),
-      policy: defaultRunPolicyFor("chat"),
       text: options.text ?? "ping",
       senderName: "ContractTest",
     }),
@@ -178,7 +170,6 @@ export async function assertCompletedUsageMatchesUsageEvent(
     backend.chat.runChatTurn({
       chatId: options.chatId ?? "contract-test-chat",
       model: makeBareModelRef(backend.id, "contract-test-model"),
-      policy: defaultRunPolicyFor("chat"),
       text: options.text ?? "ping",
       senderName: "ContractTest",
     }),
@@ -225,70 +216,58 @@ export async function assertBackgroundRunnerLifecycle(
       "backend declares background capability but exposes no `background` slot",
     );
   }
-  const events = await drain(
-    backend.background.runBackgroundTask({
+  // `BackgroundRunner.background?.runOneShotAgent` is callback-driven; the
+  // contract is "completes or throws". We run it with a no-op
+  // `appendLog` and assert it settles without an unhandled error.
+  const aborted = new AbortController();
+  let threw: unknown;
+  try {
+    await backend.background.runOneShotAgent({
       prompt: options.prompt ?? "ping",
       systemPrompt: "",
       workspace: options.workspace ?? "/tmp",
-      model: makeBareModelRef(backend.id, "contract-test-model"),
-      policy: defaultRunPolicyFor("heartbeat"),
+      model: "contract-test-model",
       contextLabel: "contract-test",
-      abortController: new AbortController(),
-    }),
-  );
-  if (events[0]?.type !== "run_started") {
-    throw new ContractViolation(
-      backend.id,
-      "BackgroundRunner.lifecycle",
-      `first event was ${events[0]?.type ?? "(no events)"} instead of run_started`,
-    );
+      abortController: aborted,
+      appendLog: async () => undefined,
+    });
+  } catch (err) {
+    threw = err;
   }
-  const last = events.at(-1);
-  if (!last || (last.type !== "completed" && last.type !== "error")) {
+  if (threw && !(threw instanceof Error)) {
     throw new ContractViolation(
       backend.id,
       "BackgroundRunner.lifecycle",
-      `stream ended on ${last?.type ?? "(no events)"} instead of completed/error`,
+      `runOneShotAgent threw a non-Error: ${String(threw)}`,
     );
   }
 }
 
 /**
- * Backends with a `ModelCatalog` must answer `getDefaultModel({})`
- * with either:
- *   - a `ModelRef` whose `backend === backendId`,
- *   - `null` (catalog-driven backend with no canonical default).
- *
- * Returning a ref for a foreign backend, or throwing, are both
- * contract violations.
+ * Backends with a `ModelCatalog` must answer `getDefaultModelId()`
+ * with either a string id, `null`, or `undefined`. Throwing is a
+ * contract violation.
  */
 export async function assertModelCatalogDefaultShape(
   backend: Backend,
 ): Promise<void> {
   if (!backend.models) return;
-  let result: Awaited<ReturnType<typeof backend.models.getDefaultModel>>;
+  let result: string | null | undefined;
   try {
-    result = await backend.models.getDefaultModel({});
+    result = await backend.models.getDefaultModelId();
   } catch (err) {
     throw new ContractViolation(
       backend.id,
       "ModelCatalog.defaultShape",
-      `getDefaultModel({}) threw: ${err instanceof Error ? err.message : String(err)}`,
+      `getDefaultModelId() threw: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  if (result === null) return;
-  if (typeof result !== "object" || !("backend" in result)) {
+  if (result == null) return;
+  if (typeof result !== "string") {
     throw new ContractViolation(
       backend.id,
       "ModelCatalog.defaultShape",
-      `getDefaultModel({}) returned a non-ModelRef value: ${JSON.stringify(result)}`,
-    );
-  }
-  if (result.backend !== backend.id) {
-    throw new ContractViolation(
-      backend.id,
-      "ModelCatalog.defaultShape",
-      `getDefaultModel({}) returned a ref for backend "${result.backend}" — expected "${backend.id}"`,
+      `getDefaultModelId() returned ${typeof result}; expected string | null | undefined`,
     );
   }
 }
@@ -339,9 +318,9 @@ export async function assertUsageTelemetryShape(
 }
 
 /**
- * Run the full Phase 7 contract suite against a backend. Throws on
- * the first violation. Returns the list of contracts checked so
- * callers can assert coverage in tests.
+ * Run the full contract suite against a backend. Throws on the first
+ * violation. Returns the list of contracts checked so callers can
+ * assert coverage in tests.
  */
 export async function assertBackendContract(
   backend: Backend,

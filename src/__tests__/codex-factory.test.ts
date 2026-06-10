@@ -1,6 +1,6 @@
 /**
- * Codex backend factory tests — verify `init()` produces a
- * QueryBackend with the full surface area Talon's core expects.
+ * Codex backend factory tests — verify `init()` produces a composed
+ * `Backend` whose capability slots match what Talon's core expects.
  *
  * Stubs out the Codex SDK so the test doesn't spawn a real CLI
  * subprocess.
@@ -52,8 +52,8 @@ beforeEach(() => {
   void clearBackends; // keep imported for future use
 });
 
-describe("codex factory — QueryBackend wiring", () => {
-  it("init returns a QueryBackend with all expected methods", async () => {
+describe("codex factory — Backend wiring", () => {
+  it("init returns a Backend with the expected capability slots", async () => {
     const factory = getBackend("codex");
     expect(factory).toBeDefined();
 
@@ -72,19 +72,24 @@ describe("codex factory — QueryBackend wiring", () => {
     );
 
     expect(result.backend).toBeDefined();
-    expect(typeof result.backend.query).toBe("function");
-    expect(typeof result.backend.resolveModel).toBe("function");
-    expect(typeof result.backend.getModelInfo).toBe("function");
-    expect(typeof result.backend.getSettingsPresentation).toBe("function");
-    expect(typeof result.backend.getProviders).toBe("function");
-    expect(typeof result.backend.getProviderModels).toBe("function");
-    expect(typeof result.backend.formatModelError).toBe("function");
-    expect(typeof result.backend.listModels).toBe("function");
-    expect(typeof result.backend.runOneShotAgent).toBe("function");
-    expect(result.backend.backendLabel).toBe("Codex");
+    expect(result.backend.chat).toBeDefined();
+    expect(typeof result.backend.chat?.runChatTurn).toBe("function");
+    expect(result.backend.models).toBeDefined();
+    expect(typeof result.backend.models?.resolveModelInfo).toBe("function");
+    expect(typeof result.backend.models?.getRawModelInfo).toBe("function");
+    expect(typeof result.backend.models?.getSettingsPresentation).toBe(
+      "function",
+    );
+    expect(typeof result.backend.models?.getProviders).toBe("function");
+    expect(typeof result.backend.models?.getProviderModels).toBe("function");
+    expect(typeof result.backend.models?.formatModelError).toBe("function");
+    expect(typeof result.backend.models?.listModels).toBe("function");
+    expect(result.backend.background).toBeDefined();
+    expect(typeof result.backend.background?.runOneShotAgent).toBe("function");
+    expect(result.backend.label).toBe("Codex");
   });
 
-  it("resolveModel works through the QueryBackend wrapper", async () => {
+  it("resolveModel works through the models slot", async () => {
     const factory = getBackend("codex");
     const { backend } = await factory!.init(
       {
@@ -100,14 +105,14 @@ describe("codex factory — QueryBackend wiring", () => {
       },
     );
 
-    const resolution = await backend.resolveModel!("gpt-5-codex");
+    const resolution = await backend.models!.resolveModelInfo("gpt-5-codex");
     expect(resolution.kind).toBe("exact");
     if (resolution.kind === "exact") {
       expect(resolution.model.id).toBe("gpt-5-codex");
     }
   });
 
-  it("listModels returns the catalog via the QueryBackend wrapper", async () => {
+  it("listModels returns the catalog via the models slot", async () => {
     const factory = getBackend("codex");
     const { backend } = await factory!.init(
       {
@@ -123,9 +128,11 @@ describe("codex factory — QueryBackend wiring", () => {
       },
     );
 
-    const { models, total } = await backend.listModels!();
+    const { models, total } = await backend.models!.listModels!();
     expect(total).toBeGreaterThan(0);
-    expect(models.some((m) => m.id === "gpt-5-codex")).toBe(true);
+    expect(models.some((m: { id: string }) => m.id === "gpt-5-codex")).toBe(
+      true,
+    );
   });
 
   it("getProviders returns OpenAI as the sole provider", async () => {
@@ -143,7 +150,7 @@ describe("codex factory — QueryBackend wiring", () => {
       },
     );
 
-    const providers = await backend.getProviders!();
+    const providers = await backend.models!.getProviders!();
     expect(providers).toHaveLength(1);
     expect(providers[0].id).toBe("openai");
   });

@@ -4,12 +4,21 @@
  * The backend speaks to OpenAI's Responses API via `@openai/agents`'s
  * official SDK. MCP servers are constructed as `MCPServerStdio`
  * instances at turn time + closed in `finally`.
+ *
+ * Returns a composed `Backend` with capability slots for chat,
+ * models, and sessions.
  */
 
 import { registerBackend } from "../registry.js";
 import type { BackendFactory } from "../registry.js";
-import type { QueryBackend } from "../../core/types.js";
 import { log } from "../../util/log.js";
+import { handlerToEvents } from "../shared/handler-to-events.js";
+import {
+  composeBackend,
+  type ChatBackend,
+  type ModelCatalog,
+  type SessionBackend,
+} from "../../core/agent-runtime/capabilities.js";
 
 import { initOpenAIAgentsAgent, getOpenAIBaseUrl } from "./init.js";
 import { handleMessage as openAIAgentsHandleMessage } from "./handler.js";
@@ -17,13 +26,13 @@ import { resetState, clearChatSession } from "./state.js";
 import { releaseAllBundles } from "./mcp-pool.js";
 import { OPENAI_AGENTS_DEFAULT_MODEL } from "./constants.js";
 import {
-  resolveModel,
-  getModelInfo,
-  getSettingsPresentation,
-  getProviders,
-  getProviderModels,
-  formatModelError,
-  listModels,
+  resolveModel as openAIResolveModel,
+  getModelInfo as openAIGetModelInfo,
+  getSettingsPresentation as openAIGetSettingsPresentation,
+  getProviders as openAIGetProviders,
+  getProviderModels as openAIGetProviderModels,
+  formatModelError as openAIFormatModelError,
+  listModels as openAIListModels,
 } from "./models.js";
 
 const openAIAgentsFactory: BackendFactory = {
@@ -34,32 +43,46 @@ const openAIAgentsFactory: BackendFactory = {
     initOpenAIAgentsAgent(config, ctx.getBridgePort, ctx.frontendName);
     log("bot", "Backend: OpenAI Agents (@openai/agents)");
 
-    const backend: QueryBackend = {
-      query: (params) => openAIAgentsHandleMessage(params),
-      resetChat: (chatId) => clearChatSession(chatId),
-      resolveModel: (q) => Promise.resolve(resolveModel(q)),
-      // Only advertise a canonical default when the backend is pointed
-      // at stock OpenAI. Custom baseUrls (OpenRouter, Azure, Ollama,
-      // LiteLLM, etc) have no universal default — the catalog varies
-      // per endpoint. Returning `null` makes the resolver fall through
-      // to `config.backendDefaults["openai-agents"]` (operator override)
-      // and finally to "no model selected" if neither is configured.
-      getDefaultModel: () => {
-        const baseUrl = getOpenAIBaseUrl();
-        if (baseUrl && baseUrl.length > 0) return null;
-        return OPENAI_AGENTS_DEFAULT_MODEL;
-      },
-      getModelInfo: (id) => Promise.resolve(getModelInfo(id)),
-      getSettingsPresentation: (m, options) =>
-        getSettingsPresentation(m, options),
-      getProviders: () => Promise.resolve(getProviders()),
-      getProviderModels: (p, pg, ps) =>
-        Promise.resolve(getProviderModels(p, pg, ps)),
-      formatModelError: (q, r) => formatModelError(q, r),
-      listModels: (f) => Promise.resolve(listModels(f)),
-      cacheMetrics: "read",
-      backendLabel: "OpenAI Agents",
+    const chat: ChatBackend = {
+      runChatTurn: (params) =>
+        handlerToEvents((p) => openAIAgentsHandleMessage(p), params),
     };
+
+    const defaultIdSync = (): string | null => {
+      const baseUrl = getOpenAIBaseUrl();
+      if (baseUrl && baseUrl.length > 0) return null;
+      return OPENAI_AGENTS_DEFAULT_MODEL;
+    };
+
+    const models: ModelCatalog = {
+      resolveModelInfo: (q) => Promise.resolve(openAIResolveModel(q)),
+      // Only advertise a canonical default when the backend is
+      // pointed at stock OpenAI. Custom baseUrls (OpenRouter, Azure,
+      // Ollama, LiteLLM, etc) have no universal default — the
+      // catalog varies per endpoint.
+      getDefaultModelId: () => defaultIdSync(),
+      getRawModelInfo: (id) => Promise.resolve(openAIGetModelInfo(id)),
+      getSettingsPresentation: (m, options) =>
+        openAIGetSettingsPresentation(m, options),
+      getProviders: () => Promise.resolve(openAIGetProviders()),
+      getProviderModels: (p, pg, ps) =>
+        Promise.resolve(openAIGetProviderModels(p, pg, ps)),
+      formatModelError: (q, r) => openAIFormatModelError(q, r),
+      listModels: (f) => Promise.resolve(openAIListModels(f)),
+    };
+
+    const sessions: SessionBackend = {
+      resetChat: (chatId) => clearChatSession(chatId),
+    };
+
+    const backend = composeBackend({
+      id: "openai-agents",
+      label: "OpenAI Agents",
+      cacheMetrics: "read",
+      chat,
+      models,
+      sessions,
+    });
 
     return {
       backend,

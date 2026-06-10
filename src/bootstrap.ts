@@ -32,7 +32,8 @@ import { initDream } from "./core/dream.js";
 import { initHeartbeat } from "./core/heartbeat.js";
 import { log } from "./util/log.js";
 import type { TalonConfig } from "./util/config.js";
-import type { QueryBackend, ContextManager } from "./core/types.js";
+import type { ContextManager } from "./core/types.js";
+import type { Backend } from "./core/agent-runtime/capabilities.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -57,7 +58,7 @@ export type BootstrapResult = {
 };
 
 export type BackendAndDispatcherResult = {
-  backend: QueryBackend;
+  backend: Backend;
 };
 
 // ── Bootstrap: config, env, plugins, workspace, storage ──────────────────────
@@ -249,13 +250,13 @@ export async function initBackendAndDispatcher(
         await import("./core/backend-controller.js");
       const beId = getBackendIdForChat(chatId);
       const be = getBE(chatId);
-      const { model } = await resolveActiveModelForChat(
+      const { model, ref } = await resolveActiveModelForChat(
         chatId,
         be,
         beId,
         config,
       );
-      return { model, backendId: beId };
+      return { model, ref, backendId: beId };
     },
     context: frontend.context,
     sendTyping: frontend.sendTyping,
@@ -302,6 +303,7 @@ export async function initBackendAndDispatcher(
     model: config.model,
     dreamModel: config.dreamModel,
     workspace: config.workspace,
+    enabled: config.dream,
     getBackend: () => getBackendForRole("dream"),
   });
   // Heartbeat needs to know which non-terminal frontends are wired so it can

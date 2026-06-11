@@ -57,14 +57,15 @@ describe("registerClaudeModels", () => {
     vi.clearAllMocks();
     mockSupportedModels.mockResolvedValue(sdkModels);
 
-    const { clearModels } = await import("../core/models.js");
+    const { clearModels } = await import("../core/models/catalog.js");
     clearModels();
   });
 
   it("surfaces base and 1M variants separately while collapsing true duplicates", async () => {
     const { registerClaudeModels } =
       await import("../backend/claude-sdk/models.js");
-    const { getModels, resolveModelId } = await import("../core/models.js");
+    const { getModels, resolveModelId } =
+      await import("../core/models/catalog.js");
 
     await registerClaudeModels({ model: "default" });
 
@@ -134,7 +135,8 @@ describe("registerClaudeModels", () => {
 
     const { registerClaudeModels } =
       await import("../backend/claude-sdk/models.js");
-    const { getModels, resolveModelId } = await import("../core/models.js");
+    const { getModels, resolveModelId } =
+      await import("../core/models/catalog.js");
 
     await registerClaudeModels({ model: "default" });
 
@@ -192,7 +194,7 @@ describe("registerClaudeModels", () => {
 
     const { registerClaudeModels } =
       await import("../backend/claude-sdk/models.js");
-    const { resolveModelId } = await import("../core/models.js");
+    const { resolveModelId } = await import("../core/models/catalog.js");
 
     await registerClaudeModels({ model: "default" });
 
@@ -261,7 +263,8 @@ describe("registerClaudeModels", () => {
 
     const { registerClaudeModels } =
       await import("../backend/claude-sdk/models.js");
-    const { getModels, resolveModelId } = await import("../core/models.js");
+    const { getModels, resolveModelId } =
+      await import("../core/models/catalog.js");
 
     await registerClaudeModels({ model: "default" });
 

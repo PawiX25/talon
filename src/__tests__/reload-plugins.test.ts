@@ -45,7 +45,7 @@ vi.mock("../storage/chat-settings.js", () => ({
 vi.mock("../core/errors.js", () => ({
   classify: vi.fn(),
 }));
-vi.mock("../core/models.js", () => ({
+vi.mock("../core/models/catalog.js", () => ({
   getFallbackModel: vi.fn(),
 }));
 vi.mock("../util/trace.js", () => ({
@@ -147,7 +147,7 @@ const mockBackendNoMcp = stubBackend({
 
 // ── Import after mocks ────────────────────────────────────────────────────
 
-import { handleSharedAction } from "../core/gateway-actions.js";
+import { handleSharedAction } from "../core/engine/gateway-actions.js";
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 

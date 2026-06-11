@@ -21,8 +21,8 @@ import {
 } from "../../storage/sessions.js";
 import { log, logError, logWarn } from "../../util/log.js";
 import { traceMessage } from "../../util/trace.js";
-import { incrementCounter, recordHistogram } from "../../util/metrics.js";
-import { isTurnTerminator, stripMcpPrefix } from "../../core/tools/index.js";
+import { incrementCounter } from "../../util/metrics.js";
+import { isTurnTerminator } from "../../core/tools/index.js";
 
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -33,7 +33,7 @@ import type { ChatRunParams } from "../../core/agent-runtime/capabilities.js";
 import { makeBareModelRef } from "../../core/agent-runtime/model-ref.js";
 import { applyRetryDecisionStream } from "../shared/handle-retry.js";
 import { getConfig } from "./state.js";
-import { buildSdkOptions } from "./options.js";
+import { buildSdkOptions, getActiveFrontends } from "./options.js";
 import {
   createStreamState,
   isSystemInit,
@@ -52,6 +52,12 @@ import {
   FLOW_VIOLATION_MAX_RETRIES,
   captureDeliveredText,
   summarizeUsage,
+  buildDeliveryContract,
+  buildFlowViolationReminder,
+  buildFirstTurnReminder,
+  recordToolCall,
+  recordTurnMetrics,
+  recordFlowViolation,
 } from "../shared/index.js";
 
 // ── Post-result watchdog ────────────────────────────────────────────────────
@@ -119,14 +125,27 @@ export async function* runChatTurn(
   const session = getSession(chatId);
   const t0 = Date.now();
 
+  // Primary messaging frontend, if any. Drives the delivery-contract
+  // suffix and the frontend-aware flow-violation text. Empty in
+  // terminal mode, where no delivery tools exist and the strict
+  // tool-only contract must not be asserted.
+  const frontend: string | undefined = getActiveFrontends()[0];
+
   // Frozen per-session prompt (keyed by session epoch) — stable across
   // turns so the provider's prompt-cache prefix survives other chats'
-  // session resets. See backend/shared/system-prompt.ts.
+  // session resets. See backend/shared/system-prompt.ts. The delivery
+  // contract joins as the backend suffix — the tail of the static
+  // prompt, the highest-salience spot — so models see the tool-only
+  // flow before their first turn instead of discovering it via a
+  // [FLOW VIOLATION] retry.
   const preparedPrompt = prepareSystemPrompt({
     config,
     previousTurns: session.turns,
     chatId,
     sessionEpoch: session.createdAt,
+    backendSuffix: frontend
+      ? buildDeliveryContract("tool-only", frontend)
+      : undefined,
   });
 
   const abortController = new AbortController();
@@ -137,12 +156,20 @@ export async function* runChatTurn(
     preparedPrompt,
   );
 
-  const prompt = formatUserPrompt({
+  let prompt = formatUserPrompt({
     text,
     senderName: senderName ?? "user",
     isGroup,
     messageId: params.messageId,
   });
+  // First turn of a session is where flow violations cluster — the
+  // model hasn't seen the contract in action yet. One line appended to
+  // the turn-0 user message (never the system prompt, so the cached
+  // prefix is untouched) pre-empts the 2x-token violation retry.
+  // Skipped on flow retries: those already carry the full reminder.
+  if (frontend && session.turns === 0 && !_internal.flowRetries) {
+    prompt += `\n\n${buildFirstTurnReminder(frontend)}`;
+  }
   log("agent", `[${chatId}] <- (${text.length} chars)`);
   traceMessage(chatId, "in", text, { senderName, isGroup });
 
@@ -216,7 +243,7 @@ export async function* runChatTurn(
         }
 
         for (const tool of result.tools) {
-          incrementCounter(`tool_calls.${stripMcpPrefix(tool.name)}`);
+          recordToolCall(tool.name, "claude");
           captureIntoState(tool.name, tool.input);
           if (isTurnTerminator(tool.name, tool.input)) {
             state.turnTerminated = true;
@@ -294,8 +321,12 @@ export async function* runChatTurn(
   // ── Persist session and usage ─────────────────────────────────────────────
 
   const durationMs = Date.now() - t0;
-  recordHistogram("response_latency_ms", durationMs);
-  incrementCounter("queries_total");
+  recordTurnMetrics({
+    backend: "claude",
+    durationMs,
+    toolCalls: state.toolCalls,
+    apiCalls: state.numApiCalls,
+  });
   if (state.newSessionId) setSessionId(chatId, state.newSessionId);
   recordUsage(chatId, {
     inputTokens: state.sdkInputTokens,
@@ -327,10 +358,11 @@ export async function* runChatTurn(
     retried: (_internal.flowRetries ?? 0) > 0,
     retryCount: _internal.flowRetries ?? 0,
     maxRetries: FLOW_VIOLATION_MAX_RETRIES,
+    ...(frontend ? { reminder: buildFlowViolationReminder(frontend) } : {}),
   });
 
   if (violation.violated) {
-    incrementCounter("scratchpad.trailing_text_dropped");
+    recordFlowViolation(violation.shouldRetry ? "retried" : "cap_exhausted");
     log(
       "agent",
       `[${chatId}] flow violation: ${violation.reason}. ${
@@ -341,7 +373,6 @@ export async function* runChatTurn(
     );
 
     if (violation.shouldRetry) {
-      incrementCounter("scratchpad.flow_violation_retried");
       yield* runChatTurn(
         { ...params, text: violation.reminder },
         {
@@ -351,7 +382,6 @@ export async function* runChatTurn(
       );
       return;
     }
-    incrementCounter("scratchpad.flow_violation_cap_exhausted");
   }
 
   // Reached the non-retry path — this turn counts as one user-visible turn.

@@ -20,14 +20,14 @@ import {
   listAvailableBackends,
   rebindChat,
   releaseChat,
-} from "../../core/backend-controller.js";
+} from "../../core/engine/backend-controller.js";
 import {
   registerChat,
   disablePulse,
   enablePulse,
   isPulseEnabled,
   resetPulseCheckpoint,
-} from "../../core/pulse.js";
+} from "../../core/background/pulse.js";
 import { handleCallbackQuery } from "./handlers.js";
 import { escapeHtml } from "./formatting.js";
 import {
@@ -49,12 +49,12 @@ import {
   resolveBackendForChat,
   toggleChatFreeOnly,
 } from "./model-menu.js";
-import { resolveActiveModelForChat } from "../../core/active-model.js";
+import { resolveActiveModelForChat } from "../../core/models/active-model.js";
 import {
   displayReasoningEffort,
   getActiveReasoningLevels,
   supportsReasoningLevel,
-} from "../reasoning-levels.js";
+} from "../shared/reasoning-levels.js";
 
 /**
  * Wrapper around `editMessageText` that swallows Telegram's

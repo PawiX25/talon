@@ -174,6 +174,12 @@ vi.mock("../backend/shared/index.js", () => ({
   FLOW_VIOLATION_MAX_RETRIES: 3,
   captureDeliveredText: () => null,
   summarizeUsage: () => "0ms in=0 out=0 cache=0% tools=0",
+  buildDeliveryContract: () => "",
+  buildFlowViolationReminder: () => "",
+  buildFirstTurnReminder: () => "",
+  recordToolCall: vi.fn(),
+  recordTurnMetrics: vi.fn(),
+  recordFlowViolation: vi.fn(),
   // Tests don't exercise the retry path (the watchdog short-circuits the
   // catch block when it fires). Stub returns the no-retry shape so the
   // handler's `if (outcome.retry) return outcome.retry` falls through to
@@ -248,7 +254,8 @@ describe("Claude SDK chat handler — post-result watchdog", () => {
     // — `vi.resetModules()` above ensures we get a fresh module per test.
     vi.stubEnv("TALON_SDK_POST_RESULT_GRACE_MS", "50");
 
-    const { clearModels, registerModels } = await import("../core/models.js");
+    const { clearModels, registerModels } =
+      await import("../core/models/catalog.js");
     clearModels();
     registerModels([
       {

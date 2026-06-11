@@ -12,14 +12,14 @@
  */
 
 import { existsSync, readFileSync, mkdirSync, appendFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import writeFileAtomic from "write-file-atomic";
-import { files as pathFiles, dirs } from "../util/paths.js";
-import { log, logError, logWarn } from "../util/log.js";
-import { getDefaultModel } from "./models.js";
-import type { OneShotAgentParams } from "./types.js";
-import type { Backend } from "./agent-runtime/capabilities.js";
+import { files as pathFiles, dirs } from "../../util/paths.js";
+import { PACKAGE_PROMPTS_DIR } from "../prompt/templates.js";
+import { log, logError, logWarn } from "../../util/log.js";
+import { getDefaultModel } from "../models/catalog.js";
+import type { OneShotAgentParams } from "../types.js";
+import type { Backend } from "../agent-runtime/capabilities.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -154,9 +154,10 @@ async function runDreamAgent(lastRunTimestamp: number): Promise<string> {
   const memoryFile = pathFiles.memory;
   const dreamStateFile = DREAM_STATE_FILE;
 
-  // Load prompt template from prompts/dream.md and interpolate variables
-  const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const promptPath = resolve(projectRoot, "prompts/dream.md");
+  // Load prompt template from the package prompts/ dir and interpolate
+  // variables (PACKAGE_PROMPTS_DIR is the canonical resolver — no
+  // module-relative "../.." that breaks when this file moves).
+  const promptPath = resolve(PACKAGE_PROMPTS_DIR, "dream.md");
 
   let prompt: string;
   try {
@@ -296,8 +297,20 @@ If commands fail, log the error and continue — this stage is optional.`
 // ── Dream logging helpers ─────────────────────────────────────────────────
 
 function createDreamLogFile(): string {
-  if (!existsSync(DREAM_LOGS_DIR)) {
-    mkdirSync(DREAM_LOGS_DIR, { recursive: true });
+  // Best-effort, like appendDreamLog: a failure to create the log
+  // directory must not abort the dream run itself — the per-append
+  // writes are already caught, so a missing dir just means dropped
+  // log entries.
+  try {
+    if (!existsSync(DREAM_LOGS_DIR)) {
+      mkdirSync(DREAM_LOGS_DIR, { recursive: true });
+    }
+  } catch (err) {
+    logError(
+      "dream",
+      "Failed to create dream log dir — run continues, log entries will be dropped",
+      err,
+    );
   }
   const now = new Date();
   const ts = now.toISOString().replace(/[:.]/g, "-").slice(0, 19); // 2026-04-01T21-30-00

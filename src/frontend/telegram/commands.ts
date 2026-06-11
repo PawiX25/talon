@@ -28,8 +28,8 @@ import {
   enablePulse,
   isPulseEnabled,
   resetPulseCheckpoint,
-} from "../../core/pulse.js";
-import { forceDream } from "../../core/dream.js";
+} from "../../core/background/pulse.js";
+import { forceDream } from "../../core/background/dream.js";
 import { isUserClientReady } from "./userbot.js";
 import { getWorkspaceDiskUsage } from "../../util/workspace.js";
 import { appendDailyLog } from "../../storage/daily-log.js";
@@ -52,18 +52,21 @@ import {
   buildModelMenuViewForChat,
   resolveBackendForChat,
 } from "./model-menu.js";
-import { getBackendIdForChat } from "../../core/backend-controller.js";
-import { resolveActiveModelForChat } from "../../core/active-model.js";
+import { getBackendIdForChat } from "../../core/engine/backend-controller.js";
+import { resolveActiveModelForChat } from "../../core/models/active-model.js";
 
 import {
   displayReasoningEffort,
   getActiveReasoningLevels,
   supportsReasoningLevel,
-} from "../reasoning-levels.js";
+} from "../shared/reasoning-levels.js";
 import { handleAdminCommand } from "./admin.js";
 import { getLoadedPlugins } from "../../core/plugin.js";
 import { getMetrics } from "../../util/metrics.js";
-import { buildCacheDisplay, buildContextDisplay } from "../status-context.js";
+import {
+  buildCacheDisplay,
+  buildContextDisplay,
+} from "../shared/status-context.js";
 
 // Admin user ID is set via talon.json or TALON_ADMIN_USER_ID env var
 let ADMIN_USER_ID = 0;

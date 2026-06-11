@@ -97,18 +97,30 @@ export function renderMetricsMessages(
   const continuationHeader = "<b>📊 Metrics (cont.)</b>";
   const sections: string[][] = [];
 
+  // Histograms come in two flavours: durations (keys ending in `_ms`,
+  // rendered as human times) and plain counts like `tool_calls_per_turn`
+  // (rendered as bare numbers — "p50=1ms" for a count is nonsense).
   const histKeys = Object.keys(metrics.histograms).sort();
-  if (histKeys.length > 0) {
+  const durationKeys = histKeys.filter((key) => key.endsWith("_ms"));
+  const countKeys = histKeys.filter((key) => !key.endsWith("_ms"));
+  const histLine = (key: string, fmt: (v: number) => string): string => {
+    const h = metrics.histograms[key];
+    return (
+      `  <code>${escapeHtml(truncateMetricLabel(key))}</code>  n=${h.count} ` +
+      `p50=${fmt(h.p50)}  p95=${fmt(h.p95)} ` +
+      `p99=${fmt(h.p99)}  avg=${fmt(h.avg)}`
+    );
+  };
+  if (durationKeys.length > 0) {
     sections.push([
       "<b>Latency</b>",
-      ...histKeys.map((key) => {
-        const h = metrics.histograms[key];
-        return (
-          `  <code>${escapeHtml(truncateMetricLabel(key))}</code>  n=${h.count} ` +
-          `p50=${formatDuration(h.p50)}  p95=${formatDuration(h.p95)} ` +
-          `p99=${formatDuration(h.p99)}  avg=${formatDuration(h.avg)}`
-        );
-      }),
+      ...durationKeys.map((key) => histLine(key, formatDuration)),
+    ]);
+  }
+  if (countKeys.length > 0) {
+    sections.push([
+      "<b>Distributions</b>",
+      ...countKeys.map((key) => histLine(key, String)),
     ]);
   }
 
@@ -122,7 +134,16 @@ export function renderMetricsMessages(
     }
 
     for (const prefix of [...groups.keys()].sort()) {
-      const keys = groups.get(prefix)!;
+      // tool_calls reads best as a leaderboard — busiest tools first.
+      // Other groups keep alphabetical order (stable lookup by name).
+      const keys =
+        prefix === "tool_calls"
+          ? [...groups.get(prefix)!].sort(
+              (a, b) =>
+                metrics.counters[b]! - metrics.counters[a]! ||
+                a.localeCompare(b),
+            )
+          : groups.get(prefix)!;
       sections.push([
         `<b>${escapeHtml(prefix)}</b>`,
         ...keys.map((key) => {

@@ -173,6 +173,56 @@ describe("renderMetricsMessages", () => {
     expect(messages[0]).toContain("avg=900ms");
   });
 
+  it("renders count histograms as plain numbers under Distributions", () => {
+    const messages = renderMetricsMessages({
+      counters: {},
+      histograms: {
+        response_latency_ms: {
+          count: 3,
+          p50: 250,
+          p95: 1_250,
+          p99: 2_000,
+          avg: 900,
+        },
+        tool_calls_per_turn: { count: 21, p50: 1, p95: 33, p99: 100, avg: 9 },
+      },
+    });
+
+    const out = messages.join("\n");
+    // Duration histograms stay under Latency with time units…
+    expect(out).toContain("<b>Latency</b>");
+    expect(out).toContain("p50=250ms");
+    // …while per-turn counts get their own section, unit-free.
+    expect(out).toContain("<b>Distributions</b>");
+    expect(out).toContain("p50=1  p95=33 p99=100  avg=9");
+    expect(out).not.toContain("p50=1ms");
+  });
+
+  it("sorts the tool_calls group by count, busiest first", () => {
+    const messages = renderMetricsMessages({
+      counters: {
+        "tool_calls.Read": 3,
+        "tool_calls.Bash": 162,
+        "tool_calls.end_turn": 16,
+        "backend.claude.queries": 3,
+        "backend.codex.queries": 18,
+      },
+      histograms: {},
+    });
+
+    const out = messages.join("\n");
+    const bash = out.indexOf(">Bash<");
+    const endTurn = out.indexOf(">end_turn<");
+    const read = out.indexOf(">Read<");
+    expect(bash).toBeGreaterThan(-1);
+    expect(bash).toBeLessThan(endTurn);
+    expect(endTurn).toBeLessThan(read);
+    // Other groups stay alphabetical.
+    expect(out.indexOf("claude.queries")).toBeLessThan(
+      out.indexOf("codex.queries"),
+    );
+  });
+
   it("splits large metrics output into Telegram-safe chunks", () => {
     const counters = Object.fromEntries(
       Array.from({ length: 12 }, (_, i) => [`tool_calls.tool_${i}`, i + 1]),

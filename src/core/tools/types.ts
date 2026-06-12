@@ -25,6 +25,8 @@ export type ToolTag =
   | "stickers"
   | "scheduling"
   | "triggers"
+  | "goals"
+  | "skills"
   | "web"
   | "admin";
 

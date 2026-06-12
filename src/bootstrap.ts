@@ -320,6 +320,7 @@ export async function initBackendAndDispatcher(
     workspace: config.workspace,
     getBackend: () => getBackendForRole("heartbeat"),
     frontends: frontendNames,
+    mempalace: Boolean(mempalaceCfg),
   });
 
   return { backend };

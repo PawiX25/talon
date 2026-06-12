@@ -46,9 +46,56 @@ import {
   type TriggerLanguage,
 } from "../../storage/trigger-store.js";
 import { cancelTrigger, spawnTrigger } from "../background/triggers.js";
+import {
+  deleteSkill,
+  formatSkill,
+  getAllSkills,
+  getSkill,
+  recordSkillUse,
+  saveSkill,
+  validateSkillDescription,
+  validateSkillLanguage,
+  validateSkillName,
+  validateSkillScript,
+} from "../../storage/skill-store.js";
+import {
+  runSkill,
+  validateSkillTimeout,
+  DEFAULT_SKILL_TIMEOUT_SECONDS,
+} from "../skills/runner.js";
+import {
+  addGoal,
+  countOpenGoalsForChat,
+  deleteGoal,
+  formatGoal,
+  generateGoalId,
+  getGoal,
+  getGoalsForChat,
+  isGoalPriority,
+  isGoalStatus,
+  updateGoal,
+  validateDescription,
+  validateProgressNote,
+  validateTitle,
+  GOAL_STATUSES,
+  MAX_OPEN_GOALS_PER_CHAT,
+  OPEN_GOAL_STATUSES,
+  type Goal,
+  type GoalStatus,
+} from "../../storage/goal-store.js";
 import { log, logWarn } from "../../util/log.js";
 import type { ActionResult } from "../types.js";
 import type { Backend } from "../agent-runtime/capabilities.js";
+
+/**
+ * Parse a goal due date. Accepts ISO 8601 strings (date-only or full
+ * timestamp). Returns unix ms, or undefined when unparseable.
+ */
+function parseDueDate(value: unknown): number | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : undefined;
+}
 
 /** Extract readable text from HTML using cheerio (proper DOM parser). */
 function extractText(html: string, maxLength = 8000): string {
@@ -529,6 +576,261 @@ export async function handleSharedAction(
         ok: true,
         text: `Deleted trigger "${t.name}" (${triggerId}).`,
       };
+    }
+
+    // ── Goals (persistent multi-turn objectives) ─────────────────────────
+
+    case "add_goal": {
+      const title = String(body.title ?? "").trim();
+      const description = body.description
+        ? String(body.description)
+        : undefined;
+      const priority = body.priority ?? "normal";
+
+      const titleErr = validateTitle(title);
+      if (titleErr) return { ok: false, error: titleErr };
+      const descErr = validateDescription(description);
+      if (descErr) return { ok: false, error: descErr };
+      if (!isGoalPriority(priority))
+        return { ok: false, error: "Priority must be low, normal, or high" };
+
+      let dueAt: number | undefined;
+      if (body.due !== undefined && body.due !== "") {
+        dueAt = parseDueDate(body.due);
+        if (dueAt === undefined)
+          return {
+            ok: false,
+            error: `Invalid due date "${body.due}" — use ISO 8601 (e.g. 2026-06-20)`,
+          };
+      }
+
+      const chatIdStr = String(chatId);
+      const openCount = countOpenGoalsForChat(chatIdStr);
+      if (openCount >= MAX_OPEN_GOALS_PER_CHAT) {
+        return {
+          ok: false,
+          error: `Per-chat open-goal cap reached (${MAX_OPEN_GOALS_PER_CHAT}). Complete or abandon one before adding another.`,
+        };
+      }
+
+      const now = Date.now();
+      const goal: Goal = {
+        id: generateGoalId(),
+        chatId: chatIdStr,
+        title,
+        description,
+        status: "active",
+        priority,
+        createdAt: now,
+        updatedAt: now,
+        dueAt,
+      };
+      addGoal(goal);
+      log("gateway", `add_goal: "${title}" [${goal.id}]`);
+      return {
+        ok: true,
+        text:
+          `Created goal "${title}" (id: ${goal.id})\n` +
+          `Priority: ${priority}${dueAt ? `\nDue: ${new Date(dueAt).toISOString()}` : ""}\n` +
+          `The background heartbeat agent will pursue this goal on its runs. Record progress with update_goal.`,
+      };
+    }
+
+    case "list_goals": {
+      const includeClosed = body.include_closed === true;
+      const goals = getGoalsForChat(
+        String(chatId),
+        includeClosed ? GOAL_STATUSES : OPEN_GOAL_STATUSES,
+      );
+      if (goals.length === 0)
+        return {
+          ok: true,
+          text: includeClosed
+            ? "No goals in this chat."
+            : "No open goals in this chat.",
+        };
+      return {
+        ok: true,
+        text: `Goals (${goals.length}):\n\n${goals.map((g) => formatGoal(g)).join("\n\n")}`,
+      };
+    }
+
+    case "update_goal": {
+      const goalId = String(body.goal_id ?? "");
+      if (!goalId) return { ok: false, error: "Missing goal_id" };
+      const goal = getGoal(goalId);
+      if (!goal) return { ok: false, error: `Goal ${goalId} not found` };
+      if (goal.chatId !== String(chatId))
+        return { ok: false, error: "Goal belongs to a different chat" };
+
+      const updates: Parameters<typeof updateGoal>[1] = {};
+      if (body.progress_note !== undefined) {
+        const note = String(body.progress_note);
+        const noteErr = validateProgressNote(note);
+        if (noteErr) return { ok: false, error: noteErr };
+        updates.progressNote = note;
+      }
+      if (body.status !== undefined) {
+        if (!isGoalStatus(body.status))
+          return {
+            ok: false,
+            error: `Status must be one of: ${GOAL_STATUSES.join(", ")}`,
+          };
+        updates.status = body.status as GoalStatus;
+      }
+      if (body.title !== undefined) {
+        const title = String(body.title).trim();
+        const titleErr = validateTitle(title);
+        if (titleErr) return { ok: false, error: titleErr };
+        updates.title = title;
+      }
+      if (body.description !== undefined) {
+        const description = String(body.description);
+        const descErr = validateDescription(description);
+        if (descErr) return { ok: false, error: descErr };
+        updates.description = description;
+      }
+      if (body.priority !== undefined) {
+        if (!isGoalPriority(body.priority))
+          return { ok: false, error: "Priority must be low, normal, or high" };
+        updates.priority = body.priority;
+      }
+      if (body.due !== undefined) {
+        if (body.due === "") {
+          updates.dueAt = null;
+        } else {
+          const dueAt = parseDueDate(body.due);
+          if (dueAt === undefined)
+            return {
+              ok: false,
+              error: `Invalid due date "${body.due}" — use ISO 8601 (e.g. 2026-06-20)`,
+            };
+          updates.dueAt = dueAt;
+        }
+      }
+      if (Object.keys(updates).length === 0)
+        return { ok: false, error: "No fields to update" };
+
+      const updated = updateGoal(goalId, updates);
+      log("gateway", `update_goal: "${updated?.title ?? goalId}" [${goalId}]`);
+      return {
+        ok: true,
+        text: `Updated goal "${updated?.title ?? goalId}".\n\n${updated ? formatGoal(updated) : ""}`,
+      };
+    }
+
+    case "delete_goal": {
+      const goalId = String(body.goal_id ?? "");
+      if (!goalId) return { ok: false, error: "Missing goal_id" };
+      const goal = getGoal(goalId);
+      if (!goal) return { ok: false, error: `Goal ${goalId} not found` };
+      if (goal.chatId !== String(chatId))
+        return { ok: false, error: "Goal belongs to a different chat" };
+      deleteGoal(goalId);
+      return { ok: true, text: `Deleted goal "${goal.title}" (${goalId})` };
+    }
+
+    // ── Skills (reusable agent-authored scripts — global, not chat-scoped) ─
+
+    case "save_skill": {
+      const name = String(body.name ?? "").trim();
+      const description = String(body.description ?? "").trim();
+      const language = body.language;
+      const script = String(body.script ?? "");
+
+      const nameErr = validateSkillName(name);
+      if (nameErr) return { ok: false, error: nameErr };
+      const descErr = validateSkillDescription(description);
+      if (descErr) return { ok: false, error: descErr };
+      if (!validateSkillLanguage(language))
+        return {
+          ok: false,
+          error: "Unsupported language. Choose one of: bash, python, node",
+        };
+      const scriptErr = validateSkillScript(script);
+      if (scriptErr) return { ok: false, error: scriptErr };
+
+      const existed = Boolean(getSkill(name));
+      let skill;
+      try {
+        skill = saveSkill({ name, description, language, script });
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Failed to save skill: ${err instanceof Error ? err.message : err}`,
+        };
+      }
+      log("gateway", `save_skill: "${name}" (${language})`);
+      return {
+        ok: true,
+        text:
+          `${existed ? "Updated" : "Saved"} skill "${name}" (${language})\n` +
+          `Script: ${skill.scriptPath}\n` +
+          `Run it with run_skill(name="${name}").`,
+      };
+    }
+
+    case "list_skills": {
+      const skills = getAllSkills();
+      if (skills.length === 0)
+        return {
+          ok: true,
+          text: "No skills saved yet. Use save_skill to store a reusable procedure.",
+        };
+      return {
+        ok: true,
+        text: `Skills (${skills.length}):\n${skills.map(formatSkill).join("\n")}`,
+      };
+    }
+
+    case "run_skill": {
+      const name = String(body.name ?? "").trim();
+      if (!name) return { ok: false, error: "Missing name" };
+      const skill = getSkill(name);
+      if (!skill)
+        return {
+          ok: false,
+          error: `No skill named "${name}". See list_skills.`,
+        };
+
+      const args = Array.isArray(body.args) ? body.args.map(String) : [];
+      const timeoutSeconds =
+        body.timeout_seconds != null
+          ? Number(body.timeout_seconds)
+          : DEFAULT_SKILL_TIMEOUT_SECONDS;
+      const timeoutErr = validateSkillTimeout(timeoutSeconds);
+      if (timeoutErr) return { ok: false, error: timeoutErr };
+
+      const result = await runSkill(skill, args, timeoutSeconds);
+      // Usage stats only count completed (non-timeout, spawned) runs.
+      if (!result.timedOut && result.exitCode !== null) {
+        recordSkillUse(name);
+      }
+
+      const status = result.timedOut
+        ? `TIMED OUT after ${timeoutSeconds}s`
+        : `exit ${result.exitCode ?? "n/a"}`;
+      const parts = [
+        `Skill "${name}" finished (${status}, ${result.durationMs}ms)`,
+      ];
+      if (result.stdout.trim()) parts.push(`stdout:\n${result.stdout.trim()}`);
+      if (result.stderr.trim()) parts.push(`stderr:\n${result.stderr.trim()}`);
+      if (!result.stdout.trim() && !result.stderr.trim())
+        parts.push("(no output)");
+      return {
+        ok: !result.timedOut && result.exitCode === 0,
+        ...(result.timedOut || result.exitCode !== 0
+          ? { error: parts.join("\n\n") }
+          : { text: parts.join("\n\n") }),
+      };
+    }
+
+    case "delete_skill": {
+      const name = String(body.name ?? "").trim();
+      if (!name) return { ok: false, error: "Missing name" };
+      if (!deleteSkill(name))
+        return { ok: false, error: `No skill named "${name}"` };
+      return { ok: true, text: `Deleted skill "${name}".` };
     }
 
     // ── Plugin hot-reload ──────────────────────────────────────────────

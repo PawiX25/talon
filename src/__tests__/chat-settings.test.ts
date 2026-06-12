@@ -1,4 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+// This suite tests the legacy-JSON migration paths — re-enable the
+// import that the global vitest setup disables.
+beforeEach(() => {
+  delete process.env.TALON_DISABLE_LEGACY_IMPORT;
+});
 import { existsSync, readFileSync } from "node:fs";
 
 // Mock log module
@@ -8,7 +14,10 @@ vi.mock("../util/log.js", () => ({
   logWarn: vi.fn(),
 }));
 
-// Mock fs to avoid real filesystem side effects
+// Mock fs so the legacy-import path can be driven without touching the
+// real filesystem. The SQLite side is real — it writes to the per-worker
+// TALON_DB_PATH set by setup/test-db.ts (node:sqlite does not go through
+// node:fs, so this mock doesn't affect it).
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => false),
   readFileSync: vi.fn(() => "{}"),
@@ -16,16 +25,6 @@ vi.mock("node:fs", () => ({
   mkdirSync: vi.fn(),
   renameSync: vi.fn(),
   unlinkSync: vi.fn(),
-}));
-
-// Mock write-file-atomic to prevent writes to the real production file.
-// The JsonStore primitive calls the default as a function (callback
-// form) AND as `.sync()` — accept either.
-const writeMock = vi.fn();
-vi.mock("write-file-atomic", () => ({
-  default: Object.assign((...args: unknown[]) => writeMock(...args), {
-    sync: writeMock,
-  }),
 }));
 
 const {
@@ -293,8 +292,6 @@ describe("chat-settings", () => {
       };
       vi.mocked(existsSync).mockReturnValueOnce(true);
       vi.mocked(readFileSync).mockReturnValueOnce(JSON.stringify(mockData));
-      // Also mock the dir check for save()
-      vi.mocked(existsSync).mockReturnValueOnce(true);
 
       loadChatSettings();
 
@@ -312,7 +309,6 @@ describe("chat-settings", () => {
       };
       vi.mocked(existsSync).mockReturnValueOnce(true);
       vi.mocked(readFileSync).mockReturnValueOnce(JSON.stringify(mockData));
-      vi.mocked(existsSync).mockReturnValueOnce(true);
 
       loadChatSettings();
 
@@ -325,7 +321,6 @@ describe("chat-settings", () => {
       };
       vi.mocked(existsSync).mockReturnValueOnce(true);
       vi.mocked(readFileSync).mockReturnValueOnce(JSON.stringify(mockData));
-      vi.mocked(existsSync).mockReturnValueOnce(true);
 
       loadChatSettings();
 
@@ -338,7 +333,6 @@ describe("chat-settings", () => {
       };
       vi.mocked(existsSync).mockReturnValueOnce(true);
       vi.mocked(readFileSync).mockReturnValueOnce(JSON.stringify(mockData));
-      vi.mocked(existsSync).mockReturnValueOnce(true);
 
       loadChatSettings();
 
@@ -351,7 +345,6 @@ describe("chat-settings", () => {
       };
       vi.mocked(existsSync).mockReturnValueOnce(true);
       vi.mocked(readFileSync).mockReturnValueOnce(JSON.stringify(mockData));
-      vi.mocked(existsSync).mockReturnValueOnce(true);
 
       loadChatSettings();
 
@@ -364,7 +357,6 @@ describe("chat-settings", () => {
       };
       vi.mocked(existsSync).mockReturnValueOnce(true);
       vi.mocked(readFileSync).mockReturnValueOnce(JSON.stringify(mockData));
-      vi.mocked(existsSync).mockReturnValueOnce(true);
 
       loadChatSettings();
 
@@ -497,26 +489,24 @@ describe("chat-settings — cleanupEmpty considers backend and model-picker flag
   });
 });
 
-describe("chat-settings — backup recovery on corrupt primary", () => {
-  it("loads from backup when primary JSON is corrupt", async () => {
-    const { loadChatSettings, getChatSettings } =
+describe("chat-settings — corrupt legacy file", () => {
+  it("ignores a corrupt legacy file and keeps the store usable", async () => {
+    const { loadChatSettings, getChatSettings, setChatEffort } =
       await import("../storage/chat-settings.js");
-    vi.mocked(existsSync)
-      .mockReturnValueOnce(true) // primary exists
-      .mockReturnValueOnce(true); // backup exists
-    vi.mocked(readFileSync)
-      .mockReturnValueOnce("{ INVALID JSON") // primary corrupt
-      .mockReturnValueOnce(
-        JSON.stringify({
-          "backup-settings-chat": {
-            model: "claude-sonnet-4-6",
-            effort: "medium",
-          },
-        }),
-      );
+    vi.mocked(existsSync).mockReturnValueOnce(true);
+    vi.mocked(readFileSync).mockReturnValueOnce("{ INVALID JSON");
+    expect(() => loadChatSettings()).not.toThrow();
+    // The SQLite store still works after the failed import.
+    setChatEffort("after-corrupt-settings", "medium");
+    expect(getChatSettings("after-corrupt-settings").effort).toBe("medium");
+  });
+
+  it("reloads previously persisted settings from SQLite", async () => {
+    const { loadChatSettings, getChatSettings, setChatEffort } =
+      await import("../storage/chat-settings.js");
+    setChatEffort("reload-settings-chat", "high");
+    // Reload from SQLite — no legacy file involved (existsSync false).
     loadChatSettings();
-    const s = getChatSettings("backup-settings-chat");
-    expect(s.model).toBe("claude-sonnet-4-6");
-    expect(s.effort).toBe("medium");
+    expect(getChatSettings("reload-settings-chat").effort).toBe("high");
   });
 });

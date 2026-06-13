@@ -6,7 +6,7 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import * as cheerio from "cheerio";
 import { dirs } from "../../util/paths.js";
 import {
@@ -47,22 +47,34 @@ import {
 } from "../../storage/trigger-store.js";
 import { cancelTrigger, spawnTrigger } from "../background/triggers.js";
 import {
+  deleteScript,
+  formatScript,
+  getAllScripts,
+  getScript,
+  recordScriptUse,
+  saveScript,
+  validateScriptDescription,
+  validateScriptLanguage,
+  validateScriptName,
+  validateScriptBody,
+} from "../../storage/script-store.js";
+import {
   deleteSkill,
   formatSkill,
-  getAllSkills,
-  getSkill,
-  recordSkillUse,
+  formatSkillSearchResult,
+  listSkills,
+  readSkill,
   saveSkill,
+  searchSkills,
+  validateSkillBody,
   validateSkillDescription,
-  validateSkillLanguage,
   validateSkillName,
-  validateSkillScript,
 } from "../../storage/skill-store.js";
 import {
-  runSkill,
-  validateSkillTimeout,
-  DEFAULT_SKILL_TIMEOUT_SECONDS,
-} from "../skills/runner.js";
+  runScript,
+  validateScriptTimeout,
+  DEFAULT_SCRIPT_TIMEOUT_SECONDS,
+} from "../scripts/runner.js";
 import {
   addGoal,
   countOpenGoalsForChat,
@@ -730,88 +742,88 @@ export async function handleSharedAction(
       return { ok: true, text: `Deleted goal "${goal.title}" (${goalId})` };
     }
 
-    // ── Skills (reusable agent-authored scripts — global, not chat-scoped) ─
+    // ── Scripts (reusable agent-authored scripts — global, not chat-scoped) ─
 
-    case "save_skill": {
+    case "save_script": {
       const name = String(body.name ?? "").trim();
       const description = String(body.description ?? "").trim();
       const language = body.language;
       const script = String(body.script ?? "");
 
-      const nameErr = validateSkillName(name);
+      const nameErr = validateScriptName(name);
       if (nameErr) return { ok: false, error: nameErr };
-      const descErr = validateSkillDescription(description);
+      const descErr = validateScriptDescription(description);
       if (descErr) return { ok: false, error: descErr };
-      if (!validateSkillLanguage(language))
+      if (!validateScriptLanguage(language))
         return {
           ok: false,
           error: "Unsupported language. Choose one of: bash, python, node",
         };
-      const scriptErr = validateSkillScript(script);
+      const scriptErr = validateScriptBody(script);
       if (scriptErr) return { ok: false, error: scriptErr };
 
-      const existed = Boolean(getSkill(name));
-      let skill;
+      const existed = Boolean(getScript(name));
+      let saved;
       try {
-        skill = saveSkill({ name, description, language, script });
+        saved = saveScript({ name, description, language, script });
       } catch (err) {
         return {
           ok: false,
-          error: `Failed to save skill: ${err instanceof Error ? err.message : err}`,
+          error: `Failed to save script: ${err instanceof Error ? err.message : err}`,
         };
       }
-      log("gateway", `save_skill: "${name}" (${language})`);
+      log("gateway", `save_script: "${name}" (${language})`);
       return {
         ok: true,
         text:
-          `${existed ? "Updated" : "Saved"} skill "${name}" (${language})\n` +
-          `Script: ${skill.scriptPath}\n` +
-          `Run it with run_skill(name="${name}").`,
+          `${existed ? "Updated" : "Saved"} script "${name}" (${language})\n` +
+          `Script: ${saved.scriptPath}\n` +
+          `Run it with run_script(name="${name}").`,
       };
     }
 
-    case "list_skills": {
-      const skills = getAllSkills();
-      if (skills.length === 0)
+    case "list_scripts": {
+      const scripts = getAllScripts();
+      if (scripts.length === 0)
         return {
           ok: true,
-          text: "No skills saved yet. Use save_skill to store a reusable procedure.",
+          text: "No scripts saved yet. Use save_script to store a reusable procedure.",
         };
       return {
         ok: true,
-        text: `Skills (${skills.length}):\n${skills.map(formatSkill).join("\n")}`,
+        text: `Scripts (${scripts.length}):\n${scripts.map(formatScript).join("\n")}`,
       };
     }
 
-    case "run_skill": {
+    case "run_script": {
       const name = String(body.name ?? "").trim();
       if (!name) return { ok: false, error: "Missing name" };
-      const skill = getSkill(name);
-      if (!skill)
+      const script = getScript(name);
+      if (!script)
         return {
           ok: false,
-          error: `No skill named "${name}". See list_skills.`,
+          error: `No script named "${name}". See list_scripts.`,
         };
 
       const args = Array.isArray(body.args) ? body.args.map(String) : [];
       const timeoutSeconds =
         body.timeout_seconds != null
           ? Number(body.timeout_seconds)
-          : DEFAULT_SKILL_TIMEOUT_SECONDS;
-      const timeoutErr = validateSkillTimeout(timeoutSeconds);
+          : DEFAULT_SCRIPT_TIMEOUT_SECONDS;
+      const timeoutErr = validateScriptTimeout(timeoutSeconds);
       if (timeoutErr) return { ok: false, error: timeoutErr };
 
-      const result = await runSkill(skill, args, timeoutSeconds);
+      const result = await runScript(script, args, timeoutSeconds);
       // Usage stats only count completed (non-timeout, spawned) runs.
       if (!result.timedOut && result.exitCode !== null) {
-        recordSkillUse(name);
+        recordScriptUse(name);
       }
 
       const status = result.timedOut
         ? `TIMED OUT after ${timeoutSeconds}s`
         : `exit ${result.exitCode ?? "n/a"}`;
       const parts = [
-        `Skill "${name}" finished (${status}, ${result.durationMs}ms)`,
+        `Script "${name}" finished (${status}, ${result.durationMs}ms)`,
       ];
       if (result.stdout.trim()) parts.push(`stdout:\n${result.stdout.trim()}`);
       if (result.stderr.trim()) parts.push(`stderr:\n${result.stderr.trim()}`);
@@ -823,6 +835,106 @@ export async function handleSharedAction(
           ? { error: parts.join("\n\n") }
           : { text: parts.join("\n\n") }),
       };
+    }
+
+    case "delete_script": {
+      const name = String(body.name ?? "").trim();
+      if (!name) return { ok: false, error: "Missing name" };
+      if (!deleteScript(name))
+        return { ok: false, error: `No script named "${name}"` };
+      return { ok: true, text: `Deleted script "${name}".` };
+    }
+
+    // ── Skills (markdown workflows — global, not chat-scoped) ─
+
+    case "save_skill": {
+      const name = String(body.name ?? "").trim();
+      const description = String(body.description ?? "").trim();
+      const skillBody = String(body.body ?? "");
+
+      const nameErr = validateSkillName(name);
+      if (nameErr) return { ok: false, error: nameErr };
+      const descErr = validateSkillDescription(description);
+      if (descErr) return { ok: false, error: descErr };
+      const bodyErr = validateSkillBody(skillBody);
+      if (bodyErr) return { ok: false, error: bodyErr };
+
+      const existed = Boolean(readSkill(name));
+      let skill;
+      try {
+        skill = saveSkill({ name, description, body: skillBody });
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Failed to save skill: ${err instanceof Error ? err.message : err}`,
+        };
+      }
+      log("gateway", `save_skill: "${name}"`);
+      return {
+        ok: true,
+        text:
+          `${existed ? "Updated" : "Saved"} skill "${name}"\n` +
+          `SKILL.md: ${skill.path}\n` +
+          `Bundle supporting files alongside it in that folder if needed.\n` +
+          `Load it with read_skill(name="${name}").`,
+      };
+    }
+
+    case "list_skills": {
+      const skills = listSkills();
+      if (skills.length === 0)
+        return {
+          ok: true,
+          text: "No skills saved yet. Use save_skill to store a reusable markdown workflow.",
+        };
+      return {
+        ok: true,
+        text: `Skills (${skills.length}):\n${skills.map(formatSkill).join("\n")}`,
+      };
+    }
+
+    case "find_skills": {
+      const query = String(body.query ?? "").trim();
+      if (!query) return { ok: false, error: "Missing query" };
+      const limit = Math.min(50, Math.max(1, Number(body.limit ?? 10)));
+      const results = searchSkills(query, limit);
+      if (results.length === 0)
+        return {
+          ok: true,
+          text: `No skills matched "${query}". Use list_skills to browse all saved workflows.`,
+        };
+      return {
+        ok: true,
+        text:
+          `Skill matches for "${query}" (${results.length}):\n` +
+          results.map(formatSkillSearchResult).join("\n"),
+      };
+    }
+
+    case "read_skill": {
+      const name = String(body.name ?? "").trim();
+      if (!name) return { ok: false, error: "Missing name" };
+      const skill = readSkill(name);
+      if (!skill)
+        return {
+          ok: false,
+          error: `No skill named "${name}". See list_skills.`,
+        };
+      const skillDirPath = dirname(skill.path);
+      const lines = [
+        `# ${skill.name}`,
+        "",
+        skill.description,
+        "",
+        `Path: ${skill.path}`,
+      ];
+      if (skill.resources.length > 0) {
+        lines.push(
+          `Bundled files (read with the Read tool from ${skillDirPath}): ${skill.resources.join(", ")}`,
+        );
+      }
+      lines.push("", skill.body);
+      return { ok: true, text: lines.join("\n") };
     }
 
     case "delete_skill": {

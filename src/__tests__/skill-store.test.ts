@@ -1,7 +1,5 @@
 /**
- * Skill store — validation, CRUD, and script-file lifecycle against
- * the real (per-worker throwaway) SQLite database and a per-suite
- * tmpdir workspace.
+ * Skill store — SKILL.md workflow bundle lifecycle (folder layout).
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
@@ -11,9 +9,11 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { parse } from "yaml";
 
 vi.mock("../util/log.js", () => ({
   log: vi.fn(),
@@ -42,14 +42,15 @@ vi.mock("../util/paths.js", async () => {
 import {
   deleteSkill,
   formatSkill,
-  getAllSkills,
-  getSkill,
-  recordSkillUse,
+  skillPath,
+  listSkills,
+  readSkill,
+  renderSkillsPrompt,
   saveSkill,
+  searchSkills,
+  validateSkillBody,
   validateSkillDescription,
-  validateSkillLanguage,
   validateSkillName,
-  validateSkillScript,
 } from "../storage/skill-store.js";
 
 beforeAll(() => {
@@ -61,102 +62,117 @@ afterAll(() => {
 });
 
 describe("validation", () => {
-  it("accepts slug names, rejects spaces/dots/empty", () => {
-    expect(validateSkillName("fetch_report-v2")).toBeNull();
-    expect(validateSkillName("")).toMatch(/Missing/);
-    expect(validateSkillName("has space")).toMatch(/letters/);
-    expect(validateSkillName("dot.name")).toMatch(/letters/);
-    expect(validateSkillName("x".repeat(65))).toMatch(/letters/);
-  });
-
-  it("validates language, script, and description", () => {
-    expect(validateSkillLanguage("bash")).toBe(true);
-    expect(validateSkillLanguage("lua")).toBe(false);
-    expect(validateSkillScript("echo hi")).toBeNull();
-    expect(validateSkillScript("  ")).toMatch(/Missing/);
-    expect(validateSkillScript("x".repeat(65 * 1024))).toMatch(/too large/);
-    expect(validateSkillDescription("does a thing")).toBeNull();
+  it("accepts slug names and rejects invalid metadata", () => {
+    expect(validateSkillName("gh-review-v1")).toBeNull();
+    expect(validateSkillName("bad name")).toMatch(/letters/);
+    expect(validateSkillDescription("review workflow")).toBeNull();
     expect(validateSkillDescription("")).toMatch(/Missing/);
-    expect(validateSkillDescription("x".repeat(301))).toMatch(/too long/);
+    expect(validateSkillBody("## Steps\n\nDo things")).toBeNull();
+    expect(validateSkillBody("   ")).toMatch(/Missing/);
   });
 });
 
-describe("save / get / delete lifecycle", () => {
-  it("writes the script file (owner-only mode) and round-trips metadata", () => {
+describe("save / read / list / delete", () => {
+  it("writes <name>/SKILL.md with YAML frontmatter and round-trips the body", () => {
     const skill = saveSkill({
-      name: "greet",
-      description: "prints a greeting",
-      language: "bash",
-      script: "echo hello",
+      name: "review-pr",
+      description: "review pull requests",
+      body: "## Steps\n\n1. Read diff.\n2. Run tests.",
     });
-    expect(skill.scriptPath).toContain(join("skills", "greet.sh"));
-    expect(readFileSync(skill.scriptPath, "utf-8")).toBe("echo hello");
-    // 0o700 — owner read/write/exec only. Windows has no POSIX modes
-    // (chmod is a no-op; stat reports 0o666), so assert POSIX-only.
+
+    expect(skill.path).toBe(skillPath("review-pr"));
+    expect(basename(skill.path)).toBe("SKILL.md");
+
+    const raw = readFileSync(skill.path, "utf-8");
+    // Frontmatter parses as real YAML and round-trips name + description.
+    const fmEnd = raw.indexOf("\n---", 4);
+    const fm = parse(raw.slice(4, fmEnd)) as Record<string, unknown>;
+    expect(fm.name).toBe("review-pr");
+    expect(fm.description).toBe("review pull requests");
+
     if (process.platform !== "win32") {
-      expect(statSync(skill.scriptPath).mode & 0o777).toBe(0o700);
+      expect(statSync(skill.path).mode & 0o777).toBe(0o600);
     }
 
-    const loaded = getSkill("greet");
-    expect(loaded).toEqual(skill);
-    expect(loaded?.useCount).toBe(0);
+    const loaded = readSkill("review-pr");
+    expect(loaded?.name).toBe("review-pr");
+    expect(loaded?.description).toBe("review pull requests");
+    expect(loaded?.body).toContain("Run tests");
   });
 
-  it("save to an existing name replaces; language change swaps the file", () => {
-    const v1 = saveSkill({
-      name: "transform",
-      description: "v1",
-      language: "bash",
-      script: "echo v1",
+  it("enumerates bundled resources and preserves them across updates", () => {
+    saveSkill({
+      name: "bundled",
+      description: "skill with extras",
+      body: "## Steps\n\nUse helper.py.",
     });
-    const v2 = saveSkill({
-      name: "transform",
-      description: "v2",
-      language: "node",
-      script: "console.log('v2')",
+
+    const dir = dirname(skillPath("bundled"));
+    writeFileSync(join(dir, "helper.py"), "print('hi')\n");
+    writeFileSync(join(dir, "template.md"), "# Template\n");
+
+    const loaded = readSkill("bundled");
+    expect(loaded?.resources).toContain("helper.py");
+    expect(loaded?.resources).toContain("template.md");
+    expect(loaded?.resources).not.toContain("SKILL.md");
+
+    // Updating the skill must not delete sibling bundled files.
+    saveSkill({
+      name: "bundled",
+      description: "skill with extras (v2)",
+      body: "## Steps\n\nUpdated.",
     });
-    expect(v2.id).toBe(v1.id); // identity stable across updates
-    expect(v2.createdAt).toBe(v1.createdAt);
-    expect(v2.description).toBe("v2");
-    expect(v2.scriptPath.endsWith(".mjs")).toBe(true);
-    expect(existsSync(v1.scriptPath)).toBe(false); // old .sh removed
-    expect(getAllSkills().filter((s) => s.name === "transform")).toHaveLength(
-      1,
-    );
+    expect(existsSync(join(dir, "helper.py"))).toBe(true);
+    expect(existsSync(join(dir, "template.md"))).toBe(true);
+    const reloaded = readSkill("bundled");
+    expect(reloaded?.description).toBe("skill with extras (v2)");
+    expect(reloaded?.resources).toContain("helper.py");
+
+    deleteSkill("bundled");
   });
 
-  it("records use and deletes (including the script file)", () => {
-    const skill = saveSkill({
-      name: "counted",
-      description: "use counting",
-      language: "bash",
-      script: "true",
+  it("lists, formats, renders prompt discovery, and deletes", () => {
+    saveSkill({
+      name: "release-check",
+      description: "ship a release",
+      body: "## Release\n\nCheck CI first.",
     });
-    recordSkillUse("counted");
-    recordSkillUse("counted");
-    const used = getSkill("counted");
-    expect(used?.useCount).toBe(2);
-    expect(used?.lastUsedAt).toBeGreaterThan(0);
 
-    expect(deleteSkill("counted")).toBe(true);
-    expect(getSkill("counted")).toBeUndefined();
-    expect(existsSync(skill.scriptPath)).toBe(false);
-    expect(deleteSkill("counted")).toBe(false);
+    const listed = listSkills();
+    expect(listed.map((s) => s.name)).toEqual(["release-check", "review-pr"]);
+    expect(formatSkill(listed[0])).toContain("release-check");
+
+    const prompt = renderSkillsPrompt();
+    expect(prompt).toContain("## Available Skills");
+    expect(prompt).toContain("find_skills");
+    expect(prompt).toContain("read_skill");
+    expect(prompt).toContain("review-pr");
+
+    expect(deleteSkill("review-pr")).toBe(true);
+    expect(existsSync(skillPath("review-pr"))).toBe(false);
+    expect(deleteSkill("review-pr")).toBe(false);
   });
-});
 
-describe("formatSkill", () => {
-  it("renders name, language, usage, and description on one line", () => {
-    const skill = saveSkill({
-      name: "fmt-test",
-      description: "formats things",
-      language: "python",
-      script: "print('x')",
+  it("searches skills by relevant workflow terms", () => {
+    saveSkill({
+      name: "github-review",
+      description: "address GitHub pull request review comments",
+      body: "Use the GraphQL unresolved review thread flow, inspect inline comments, patch code, run tests, then resolve threads.",
     });
-    const line = formatSkill(skill);
-    expect(line).toContain("fmt-test");
-    expect(line).toContain("python");
-    expect(line).toContain("never used");
-    expect(line).toContain("formats things");
+    saveSkill({
+      name: "release-check",
+      description: "ship a release",
+      body: "Check CI first.",
+    });
+
+    const results = searchSkills("unresolved review comments");
+    expect(results.map((result) => result.skill.name)[0]).toBe("github-review");
+    expect(results[0].snippet).toContain("unresolved review thread");
+    expect(searchSkills("no-such-workflow")).toEqual([]);
+  });
+
+  it("rejects path-traversal names in read and delete", () => {
+    expect(readSkill("../escape")).toBeUndefined();
+    expect(deleteSkill("../escape")).toBe(false);
   });
 });

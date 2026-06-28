@@ -29,8 +29,11 @@ vi.mock("../storage/media-index.js", () => ({
   formatMediaIndex: mockFormatMediaIndex,
 }));
 
-const mockAddCronJob = vi.fn();
-const mockGetCronJob = vi.fn();
+const mockCronJobs = new Map<string, any>();
+const mockAddCronJob = vi.fn((job: any) => {
+  mockCronJobs.set(job.id, job);
+});
+const mockGetCronJob = vi.fn((id: string) => mockCronJobs.get(id));
 const mockGetCronJobsForChat = vi.fn((): any[] => []);
 const mockUpdateCronJob = vi.fn();
 const mockDeleteCronJob = vi.fn();
@@ -41,6 +44,10 @@ const mockValidateCronExpression = vi.fn(
   }),
 );
 const mockGenerateCronId = vi.fn(() => "test-id-123");
+const mockDescribeSchedule = vi.fn((job: any) =>
+  job.everyMs ? `every ${Math.round(job.everyMs / 1000)}s` : job.schedule,
+);
+const mockNextRunAt = vi.fn(() => Date.parse("2026-04-01T09:00:00.000Z"));
 
 vi.mock("../storage/cron-store.js", () => ({
   addCronJob: mockAddCronJob,
@@ -50,6 +57,8 @@ vi.mock("../storage/cron-store.js", () => ({
   deleteCronJob: mockDeleteCronJob,
   validateCronExpression: mockValidateCronExpression,
   generateCronId: mockGenerateCronId,
+  describeSchedule: mockDescribeSchedule,
+  nextRunAt: mockNextRunAt,
   loadCronJobs: vi.fn(),
 }));
 
@@ -158,6 +167,20 @@ describe("gateway shared actions", () => {
     originalFetch = globalThis.fetch;
     originalEnv = { ...process.env };
     vi.clearAllMocks();
+    mockCronJobs.clear();
+    mockValidateCronExpression.mockReset();
+    mockNextRunAt.mockReset();
+    mockDescribeSchedule.mockReset();
+    mockGetCronJob.mockImplementation((id: string) => mockCronJobs.get(id));
+    mockGetCronJobsForChat.mockReturnValue([]);
+    mockDescribeSchedule.mockImplementation((job: any) =>
+      job.everyMs ? `every ${Math.round(job.everyMs / 1000)}s` : job.schedule,
+    );
+    mockNextRunAt.mockReturnValue(Date.parse("2026-04-01T09:00:00.000Z"));
+    mockValidateCronExpression.mockReturnValue({
+      valid: true,
+      next: "2026-04-01T09:00:00.000Z",
+    });
   });
 
   afterEach(() => {
@@ -913,7 +936,7 @@ describe("gateway shared actions", () => {
         );
       });
 
-      it("rejects missing schedule", async () => {
+      it("rejects missing cadence", async () => {
         const result = await handleSharedAction(
           {
             action: "create_cron_job",
@@ -924,7 +947,8 @@ describe("gateway shared actions", () => {
         );
         expect(result).toEqual({
           ok: false,
-          error: "Missing schedule expression",
+          error:
+            "Provide either 'schedule' (a cron expression) or 'every_seconds' (a fixed interval).",
         });
       });
 
@@ -995,7 +1019,7 @@ describe("gateway shared actions", () => {
       });
 
       it("shows 'unknown' when next run time is not available", async () => {
-        mockValidateCronExpression.mockReturnValueOnce({ valid: true });
+        mockNextRunAt.mockReturnValueOnce(null as unknown as number);
 
         const result = await handleSharedAction(
           {
@@ -1149,7 +1173,7 @@ describe("gateway shared actions", () => {
         expect(result?.text).toContain("Lunch Alert (disabled)");
       });
 
-      it("shows 'unknown' for nextRun when validation returns no next", async () => {
+      it("shows em dash for nextRun when nextRunAt returns null", async () => {
         mockGetCronJobsForChat.mockReturnValue([
           {
             id: "job-4",
@@ -1163,14 +1187,14 @@ describe("gateway shared actions", () => {
             runCount: 0,
           },
         ]);
-        mockValidateCronExpression.mockReturnValueOnce({ valid: false });
+        mockNextRunAt.mockReturnValueOnce(null as unknown as number);
 
         const result = await handleSharedAction(
           { action: "list_cron_jobs" },
           42,
         );
 
-        expect(result?.text).toContain("Next: unknown");
+        expect(result?.text).toContain("Next: —");
       });
 
       it("truncates long content to 100 chars with ellipsis", async () => {
@@ -1809,6 +1833,16 @@ describe("gateway-actions — additional branch coverage", () => {
 describe("per-job model override + discovery actions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCronJobs.clear();
+    mockValidateCronExpression.mockReset();
+    mockNextRunAt.mockReset();
+    mockDescribeSchedule.mockReset();
+    mockGetCronJob.mockImplementation((id: string) => mockCronJobs.get(id));
+    mockGetCronJobsForChat.mockReturnValue([]);
+    mockDescribeSchedule.mockImplementation((job: any) =>
+      job.everyMs ? `every ${Math.round(job.everyMs / 1000)}s` : job.schedule,
+    );
+    mockNextRunAt.mockReturnValue(Date.parse("2026-04-01T09:00:00.000Z"));
     mockGetBackendIdForChat.mockReturnValue("claude");
     mockGetBackendForChat.mockReturnValue({
       background: {},

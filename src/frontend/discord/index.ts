@@ -25,18 +25,18 @@ import type { TalonConfig } from "../../util/config.js";
 import type { ContextManager } from "../../core/types.js";
 import type { Gateway } from "../../core/engine/gateway.js";
 import { log, logError, logWarn } from "../../util/log.js";
-import { createDiscordActionHandler } from "./actions.js";
+import { createDiscordActionHandler } from "./actions/index.js";
 import {
   registerCommandsForGuilds,
   registerInteractionRouter,
-} from "./commands.js";
+} from "./commands/index.js";
 import { registerMiddleware } from "./middleware.js";
 import {
   setAccessControl,
   lookupDiscordChat,
   registerDiscordChat,
-} from "./handlers.js";
-import { sendChunked } from "./handlers.js";
+} from "./handlers/index.js";
+import { sendChunked } from "./handlers/index.js";
 import { deriveNumericChatId } from "../../util/chat-id.js";
 
 // ── Frontend type ───────────────────────────────────────────────────────────

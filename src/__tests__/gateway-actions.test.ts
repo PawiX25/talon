@@ -80,7 +80,7 @@ const mockAcquireBackendInstance = vi.fn(
   },
 );
 const mockIsModelValidForBackend = vi.fn(async () => true);
-vi.mock("../core/engine/backend-controller.js", () => ({
+vi.mock("../core/engine/backend-controller/index.js", () => ({
   getBackendForChat: mockGetBackendForChat,
   getBackendIdForChat: mockGetBackendIdForChat,
   getAvailableBackends: mockGetAvailableBackends,
@@ -106,7 +106,7 @@ vi.mock("node:fs", () => ({
 }));
 
 const { handleSharedAction } =
-  await import("../core/engine/gateway-actions.js");
+  await import("../core/engine/gateway-actions/index.js");
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

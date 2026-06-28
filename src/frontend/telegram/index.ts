@@ -13,16 +13,16 @@ import type { TalonConfig } from "../../util/config.js";
 import { soulEnabled } from "../../core/soul/settings.js";
 import type { ContextManager } from "../../core/types.js";
 import type { Gateway } from "../../core/engine/gateway.js";
-import { createTelegramActionHandler, sendText } from "./actions.js";
+import { createTelegramActionHandler, sendText } from "./actions/index.js";
 import { initUserClient, disconnectUserClient } from "./userbot.js";
 import {
   registerCommands,
   setAdminUserId,
   TELEGRAM_COMMANDS,
-} from "./commands.js";
-import { setAccessControl } from "./handlers.js";
+} from "./commands/index.js";
+import { setAccessControl } from "./handlers/index.js";
 import { registerMiddleware } from "./middleware.js";
-import { registerCallbacks } from "./callbacks.js";
+import { registerCallbacks } from "./callbacks/index.js";
 import { log, logError } from "../../util/log.js";
 
 // ── Frontend interface ──────────────────────────────────────────────────────

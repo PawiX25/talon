@@ -32,14 +32,14 @@ import {
   buildModelMenuState,
   type ModelMenuState,
   type SettingsButton,
-} from "./helpers.js";
+} from "./helpers/index.js";
 import {
   hasBackendPool,
   getBackendIdForChat,
   hasChatBackendOverride,
   listAvailableBackends,
   resolveChatBackend,
-} from "../../core/engine/backend-controller.js";
+} from "../../core/engine/backend-controller/index.js";
 import {
   getChatSettings,
   setChatFreeOnly,

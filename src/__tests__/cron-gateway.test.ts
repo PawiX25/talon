@@ -22,7 +22,7 @@
  *   3. backend-controller + active-model — mocked, so the per-job model
  *      override validation is deterministic (a known model resolves, an
  *      unknown one returns null → rejected).
- * background/triggers.js is imported at the top of gateway-actions purely
+ * background/triggers/index.js is imported at the top of gateway-actions purely
  * for the trigger_* actions; mocked to a no-op so the module loads.
  */
 
@@ -73,13 +73,13 @@ vi.mock("../core/background/cron.js", () => ({
 }));
 
 // Trigger spawn/cancel — only referenced by trigger_* actions; no-op here.
-vi.mock("../core/background/triggers.js", () => ({
+vi.mock("../core/background/triggers/index.js", () => ({
   spawnTrigger: vi.fn(),
   cancelTrigger: vi.fn(() => false),
 }));
 
 // Per-chat backend lookup — values are opaque to the model validator below.
-vi.mock("../core/engine/backend-controller.js", () => ({
+vi.mock("../core/engine/backend-controller/index.js", () => ({
   getBackendForChat: vi.fn(() => ({ id: "test-backend", background: {} })),
   getBackendIdForChat: vi.fn(() => "test-backend"),
   getAvailableBackends: vi.fn(() => [{ id: "test-backend", label: "Test" }]),
@@ -106,7 +106,7 @@ import type { CronJob } from "../storage/cron-store.js";
 import type { ActionResult } from "../core/types.js";
 
 const { handleSharedAction } =
-  await import("../core/engine/gateway-actions.js");
+  await import("../core/engine/gateway-actions/index.js");
 const { getCronJob, addCronJob } = await import("../storage/cron-store.js");
 
 const CHAT_ID = 4242;

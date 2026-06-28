@@ -36,7 +36,7 @@ export {
   renderOpenCodeModelList,
   formatOpenCodeSelectionError,
   formatOpenCodeUnavailableModel,
-} from "./models.js";
+} from "./models/index.js";
 
 // ── Sessions ───────────────────────────────────────────────────────────────
 export {
@@ -70,7 +70,7 @@ export {
 } from "./server.js";
 
 // ── Handler ────────────────────────────────────────────────────────────────
-export { handleMessage, getActiveSession } from "./handler.js";
+export { handleMessage, getActiveSession } from "./handler/index.js";
 
 // ── Model provider (Backend adapter) ──────────────────────────────────
 export {

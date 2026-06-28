@@ -20,13 +20,13 @@ import {
   startHeartbeatTimer,
   stopHeartbeatTimer,
   awaitCurrentRun as awaitHeartbeat,
-} from "./core/background/heartbeat.js";
+} from "./core/background/heartbeat/index.js";
 import {
   startCronTimer,
   stopCronTimer,
   runStartupCatchup,
 } from "./core/background/cron.js";
-import { shutdownTriggers } from "./core/background/triggers.js";
+import { shutdownTriggers } from "./core/background/triggers/index.js";
 import { startWatchdog, stopWatchdog } from "./util/watchdog.js";
 import { log, logError, logWarn } from "./util/log.js";
 import { bootstrap, initBackendAndDispatcher } from "./bootstrap.js";
@@ -89,7 +89,7 @@ gateway.backend = backend;
 // touch the gateway field — those roles run from their own getBackend
 // providers (dispatcher routes per chat).
 const { onBackendChange, roleHolder } =
-  await import("./core/engine/backend-controller.js");
+  await import("./core/engine/backend-controller/index.js");
 const CHAT_ROLE_HOLDER = roleHolder("chat");
 onBackendChange((holder, newBackend, info) => {
   if (holder !== CHAT_ROLE_HOLDER) return;
@@ -127,7 +127,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   }
   // Destroy plugins (cleanup resources)
   if (config.plugins.length > 0) {
-    const { destroyPlugins } = await import("./core/plugin.js");
+    const { destroyPlugins } = await import("./core/plugin/index.js");
     await destroyPlugins();
   }
   stopPulseTimer();

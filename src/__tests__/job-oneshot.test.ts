@@ -29,7 +29,7 @@ import {
   cleanupBackendPool,
   initBackendPool,
   resetBackendPoolForTest,
-} from "../core/engine/backend-controller.js";
+} from "../core/engine/backend-controller/index.js";
 import type { TalonConfig } from "../util/config.js";
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────

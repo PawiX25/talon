@@ -27,9 +27,9 @@ import { initCron } from "./core/background/cron.js";
 import {
   initTriggers,
   resumeAfterRestart as resumeTriggersAfterRestart,
-} from "./core/background/triggers.js";
+} from "./core/background/triggers/index.js";
 import { initDream } from "./core/background/dream.js";
-import { initHeartbeat } from "./core/background/heartbeat.js";
+import { initHeartbeat } from "./core/background/heartbeat/index.js";
 import { log } from "./util/log.js";
 import type { TalonConfig } from "./util/config.js";
 import type { ContextManager } from "./core/types.js";
@@ -80,7 +80,7 @@ export async function bootstrap(
     config.playwright?.enabled === true;
   if (hasPlugins) {
     const { loadPlugins, loadBuiltinPlugins, getPluginPromptAdditions } =
-      await import("./core/plugin.js");
+      await import("./core/plugin/index.js");
 
     // External plugins
     if (config.plugins.length > 0) {
@@ -140,7 +140,7 @@ export async function initBackendAndDispatcher(
     releaseChat,
     isBackendAvailable,
     isModelValidForBackend,
-  } = await import("./core/engine/backend-controller.js");
+  } = await import("./core/engine/backend-controller/index.js");
 
   // Boot the backend pool — binds the chat / heartbeat / dream roles
   // from `config.backend`, `config.heartbeatBackend`,
@@ -247,7 +247,7 @@ export async function initBackendAndDispatcher(
       const { resolveActiveModelForChat } =
         await import("./core/models/active-model.js");
       const { getBackendIdForChat, getBackendForChat: getBE } =
-        await import("./core/engine/backend-controller.js");
+        await import("./core/engine/backend-controller/index.js");
       const beId = getBackendIdForChat(chatId);
       const be = getBE(chatId);
       const { model, ref } = await resolveActiveModelForChat(
@@ -266,7 +266,7 @@ export async function initBackendAndDispatcher(
       const { resolveExplicitModelRef } =
         await import("./core/models/active-model.js");
       const { getBackendIdForChat, getBackendForChat: getBE } =
-        await import("./core/engine/backend-controller.js");
+        await import("./core/engine/backend-controller/index.js");
       return resolveExplicitModelRef(
         modelId,
         getBE(chatId),
@@ -287,7 +287,7 @@ export async function initBackendAndDispatcher(
       const { resolveActiveModelForChat } =
         await import("./core/models/active-model.js");
       const { getBackendIdForChat, getBackendForChat: getBE } =
-        await import("./core/engine/backend-controller.js");
+        await import("./core/engine/backend-controller/index.js");
       const beId = getBackendIdForChat(chatId);
       const { model } = await resolveActiveModelForChat(
         chatId,
@@ -321,7 +321,7 @@ export async function initBackendAndDispatcher(
   // Only enable mempalace dream integration if the plugin actually registered
   let mempalaceCfg: { pythonPath: string; palacePath: string } | undefined;
   if (config.mempalace?.enabled) {
-    const { getPlugin } = await import("./core/plugin.js");
+    const { getPlugin } = await import("./core/plugin/index.js");
     if (getPlugin("mempalace")) {
       const { dirs, files: pathFiles } = await import("./util/paths.js");
       mempalaceCfg = {

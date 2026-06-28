@@ -19,7 +19,7 @@ import { log, logWarn } from "../../util/log.js";
 import {
   acquireBackendInstance,
   isModelValidForBackend,
-} from "../engine/backend-controller.js";
+} from "../engine/backend-controller/index.js";
 import type { OneShotAgentParams } from "../types.js";
 import { runIsolatedAgent } from "./isolated-agent.js";
 import {

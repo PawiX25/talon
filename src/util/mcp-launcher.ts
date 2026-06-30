@@ -43,7 +43,8 @@
  *      daemons keep our stdin open across Talon restarts.
  */
 
-import { spawn } from "node:child_process";
+import crossSpawn from "cross-spawn";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -217,10 +218,14 @@ export function runSupervisor(argvTail: string[]): Promise<never> {
 
   const BRIDGE_URL = process.env.TALON_BRIDGE_URL;
 
-  const child = spawn(cmd, args, {
+  // cross-spawn handles .cmd/.bat scripts on Windows correctly — it resolves
+  // the executable and sets up the shell wrapper only when needed, preserving
+  // the process tree so SIGTERM/SIGKILL propagation and orphan cleanup work.
+  // stdio is always 'pipe' so stdin/stdout/stderr are guaranteed non-null.
+  const child = crossSpawn(cmd, args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
-  });
+  }) as ChildProcessWithoutNullStreams;
 
   // Any pipe end-point can throw EPIPE if the other side closes mid-write.
   // We silence those; the exit and close paths already drive shutdown.

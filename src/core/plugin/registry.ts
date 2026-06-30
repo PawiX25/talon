@@ -7,6 +7,7 @@
  * `reloadState` / `_deps` holders from here so state stays coherent.
  */
 
+import { pathToFileURL } from "node:url";
 import { logError, logWarn } from "../../util/log.js";
 import type { LoadedPlugin, PluginMcpEntry } from "./types.js";
 
@@ -113,6 +114,11 @@ export const reloadState: { lastReloadAt: string } = {
 /** Internal deps — exposed as an object so tests can replace properties.
  *  Direct function exports can't be mocked for internal callers in ESM. */
 export const _deps = {
-  importModule: async (path: string): Promise<Record<string, unknown>> =>
-    import(path),
+  importModule: async (path: string): Promise<Record<string, unknown>> => {
+    // Convert absolute filesystem paths to file:// URLs on Windows where
+    // dynamic import() rejects bare drive-letter paths (e.g. C:\...).
+    // Leave node: specifiers, relative paths, and URLs unchanged.
+    const isAbsFilePath = /^[a-zA-Z]:[/\\]/.test(path) || path.startsWith("/");
+    return import(isAbsFilePath ? pathToFileURL(path).href : path);
+  },
 };

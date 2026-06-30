@@ -39,7 +39,8 @@ import {
   getBackendIdForChat,
 } from "../../core/engine/backend-controller/index.js";
 import { getActiveReasoningLevels } from "../shared/reasoning-levels.js";
-import { NativeChats, type ChatEntry } from "./chats.js";
+import { NativeChats, DEFAULT_CHAT_TITLE, type ChatEntry } from "./chats.js";
+import { extractSessionName } from "../../backend/shared/session-name.js";
 import { BridgeServer, type BridgeServerHandlers } from "./server.js";
 import { createNativeActionHandler } from "./actions.js";
 import {
@@ -107,6 +108,22 @@ export function createNativeFrontend(
   const broadcastChatUpdated = (entry: ChatEntry): void =>
     broadcast({ kind: "chat_updated", chat: toClientChat(entry) });
 
+  /**
+   * Name a chat from its first user message — instantly and for free.
+   *
+   * The title is a trimmed slice of the first message (no model call), so it
+   * lands the moment the user hits send instead of staying "New chat" until
+   * the turn finishes and a restart re-hydrates the persisted name. Only fires
+   * while the chat still carries the placeholder title, so a user's manual
+   * rename is never clobbered. Callers broadcast `chat_updated` afterwards, so
+   * the change propagates to every connected client live.
+   */
+  function maybeAutoTitle(entry: ChatEntry, text: string): void {
+    if (entry.title && entry.title !== DEFAULT_CHAT_TITLE) return;
+    const title = extractSessionName(text);
+    if (title) chats.rename(entry.id, title);
+  }
+
   // ── Outbound message helpers (persist + broadcast) ───────────────────────
 
   function emitAssistant(
@@ -155,6 +172,7 @@ export function createNativeFrontend(
       timestamp: ts,
     });
     chats.touch(entry.id, text);
+    maybeAutoTitle(entry, text);
     broadcast({ kind: "message", chatId: entry.id, message });
     broadcastChatUpdated(entry);
   }

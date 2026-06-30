@@ -14,7 +14,8 @@ import {
   BOT_SENDER_ID,
   USER_SENDER_ID,
 } from "../frontend/native/protocol.js";
-import { NativeChats } from "../frontend/native/chats.js";
+import { NativeChats, DEFAULT_CHAT_TITLE } from "../frontend/native/chats.js";
+import { extractSessionName } from "../backend/shared/session-name.js";
 import { createNativeActionHandler } from "../frontend/native/actions.js";
 import {
   configSnapshot,
@@ -88,6 +89,36 @@ describe("NativeChats registry", () => {
     const again = chats.ensure("d_supplied");
     expect(first).toBe(again);
     expect(chats.count()).toBe(1);
+  });
+
+  it("auto-titles a placeholder chat from the first message, but never a renamed one", () => {
+    // Mirrors maybeAutoTitle(): only rename while the chat still carries the
+    // placeholder, and derive the title for free from the first message.
+    const chats = new NativeChats();
+    const fresh = chats.create();
+    expect(fresh.title).toBe(DEFAULT_CHAT_TITLE);
+
+    const autoTitle = (id: string, text: string) => {
+      const entry = chats.get(id);
+      if (!entry || (entry.title && entry.title !== DEFAULT_CHAT_TITLE)) return;
+      const t = extractSessionName(text);
+      if (t) chats.rename(id, t);
+    };
+
+    autoTitle(fresh.id, "[User] Improve the companion app UI [msg_id:42]");
+    expect(chats.get(fresh.id)!.title).toBe("Improve the companion app UI");
+
+    // A second message must not overwrite the now-named chat.
+    autoTitle(fresh.id, "and also fix the padding");
+    expect(chats.get(fresh.id)!.title).toBe("Improve the companion app UI");
+  });
+
+  it("leaves the placeholder when the first message has no usable text", () => {
+    const chats = new NativeChats();
+    const fresh = chats.create();
+    const derived = extractSessionName("[User] [msg_id:7]");
+    expect(derived).toBeUndefined();
+    expect(fresh.title).toBe(DEFAULT_CHAT_TITLE);
   });
 });
 

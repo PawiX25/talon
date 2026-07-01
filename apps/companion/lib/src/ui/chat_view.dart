@@ -30,10 +30,23 @@ class ChatView extends StatefulWidget {
 class _ChatViewState extends State<ChatView> {
   final _scroll = ScrollController();
 
+  /// Ids we've already shown, so the entrance animation plays once per message
+  /// and never re-fires when a row is recycled back into view on scroll.
+  final Set<String> _seen = <String>{};
+
   @override
   void dispose() {
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// A row animates in only the first time we see it AND when it's genuinely
+  /// fresh (sent/received seconds ago) — so opening a chat's history doesn't
+  /// trigger a cascade of animations.
+  bool _shouldAnimate(ClientMessage m) {
+    final firstSight = _seen.add(m.id);
+    if (!firstSight) return false;
+    return DateTime.now().difference(m.time).inMilliseconds < 4000;
   }
 
   void _autoScroll() {
@@ -110,8 +123,12 @@ class _ChatViewState extends State<ChatView> {
           itemCount: itemCount,
           itemBuilder: (context, i) {
             if (i < msgs.length) {
+              final m = msgs[i];
               return MessageBubble(
-                  message: msgs[i], botName: widget.state.status.botName);
+                message: m,
+                botName: widget.state.status.botName,
+                animateIn: _shouldAnimate(m),
+              );
             }
             return LiveTurn(turn: turn, botName: widget.state.status.botName);
           },
@@ -155,7 +172,8 @@ class _Header extends StatelessWidget {
               chat.title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
+              style:
+                  const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
             ),
           ),
           _Chip(
@@ -211,7 +229,8 @@ class _ChatMenu extends StatelessWidget {
         PopupMenuItem(
           value: 'pulse',
           child: _MenuRow(
-            icon: pulseOn ? Icons.notifications_active : Icons.notifications_off,
+            icon:
+                pulseOn ? Icons.notifications_active : Icons.notifications_off,
             label: pulseOn ? 'Disable pulse' : 'Enable pulse',
           ),
         ),
@@ -328,7 +347,8 @@ class _Chip extends StatelessWidget {
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, color: TalonColors.textDim),
+                style:
+                    const TextStyle(fontSize: 12, color: TalonColors.textDim),
               ),
             ),
           ],
@@ -349,7 +369,8 @@ class _EmptyState extends StatelessWidget {
         children: [
           BrandMark(size: 64),
           SizedBox(height: 18),
-          Text('Talon', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+          Text('Talon',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
           SizedBox(height: 6),
           Text('Select a chat, or start a new one.',
               style: TextStyle(color: TalonColors.textFaint)),

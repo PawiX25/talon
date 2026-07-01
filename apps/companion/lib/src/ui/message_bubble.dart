@@ -16,18 +16,37 @@ import 'markdown.dart';
 class MessageBubble extends StatelessWidget {
   final ClientMessage message;
   final String botName;
-  const MessageBubble({super.key, required this.message, required this.botName});
+
+  /// Play a one-shot entrance when the row first appears. Only set for freshly
+  /// arrived messages — never history or rows recycled back into view on scroll
+  /// — so the list stays calm and nothing re-animates while scrolling.
+  final bool animateIn;
+
+  const MessageBubble({
+    super.key,
+    required this.message,
+    required this.botName,
+    this.animateIn = false,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final Widget row;
     switch (message.role) {
       case Role.system:
-        return _system();
+        row = _system();
       case Role.user:
-        return _userRow();
+        row = _userRow();
       case Role.assistant:
-        return _assistantRow();
+        row = _assistantRow();
     }
+    // Respect the platform "reduce motion" setting.
+    if (!animateIn || MediaQuery.of(context).disableAnimations) return row;
+    return _MessageEntrance(
+      // A user message rises from its side; the assistant fades in place.
+      fromRight: message.role == Role.user,
+      child: row,
+    );
   }
 
   Widget _system() => Padding(
@@ -176,8 +195,7 @@ class MessageBubble extends StatelessWidget {
           children: [
             for (final r in message.reactions)
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
                   color: TalonColors.glassFill,
                   borderRadius: BorderRadius.circular(999),
@@ -188,6 +206,62 @@ class MessageBubble extends StatelessWidget {
           ],
         ),
       );
+}
+
+/// One-shot entrance for a freshly-arrived message row: a gentle rise + fade,
+/// with a whisper of scale so it settles rather than snaps. Plays exactly once
+/// (on first mount); recycled rows never wrap this, so scrolling stays still.
+class _MessageEntrance extends StatefulWidget {
+  final Widget child;
+  final bool fromRight;
+  const _MessageEntrance({required this.child, required this.fromRight});
+
+  @override
+  State<_MessageEntrance> createState() => _MessageEntranceState();
+}
+
+class _MessageEntranceState extends State<_MessageEntrance>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: TalonMotion.base,
+  )..forward();
+
+  late final Animation<double> _eased = CurvedAnimation(
+    parent: _c,
+    curve: TalonMotion.emphasized,
+  );
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dx = widget.fromRight ? 0.06 : -0.02;
+    return FadeTransition(
+      opacity: _eased,
+      child: AnimatedBuilder(
+        animation: _eased,
+        builder: (context, child) {
+          final t = _eased.value;
+          return Transform.translate(
+            offset: Offset(dx * 40 * (1 - t), 10 * (1 - t)),
+            child: Transform.scale(
+              scale: 0.985 + 0.015 * t,
+              alignment: widget.fromRight
+                  ? Alignment.centerRight
+                  : Alignment.centerLeft,
+              child: child,
+            ),
+          );
+        },
+        child: widget.child,
+      ),
+    );
+  }
 }
 
 /// Collapsed summary of the tools the model ran for an assistant message.
@@ -208,8 +282,7 @@ class _ToolHistoryState extends State<_ToolHistory> {
     final tools = widget.tools;
     final failed = tools.where((t) => t.error != null).length;
     final total = Duration(
-      milliseconds:
-          tools.fold<int>(0, (a, t) => a + t.elapsed.inMilliseconds),
+      milliseconds: tools.fold<int>(0, (a, t) => a + t.elapsed.inMilliseconds),
     );
 
     return Column(
@@ -260,7 +333,8 @@ class _ToolHistoryState extends State<_ToolHistory> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      for (final t in tools) ToolChip(key: ValueKey(t.id), tool: t),
+                      for (final t in tools)
+                        ToolChip(key: ValueKey(t.id), tool: t),
                     ],
                   ),
                 )
@@ -320,8 +394,8 @@ class _CopyButtonState extends State<_CopyButton> {
             const SizedBox(width: 5),
             Text(
               _copied ? 'Copied' : 'Copy',
-              style: const TextStyle(
-                  fontSize: 11.5, color: TalonColors.textFaint),
+              style:
+                  const TextStyle(fontSize: 11.5, color: TalonColors.textFaint),
             ),
           ],
         ),

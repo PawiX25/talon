@@ -50,6 +50,29 @@ class TalonColors {
   );
 }
 
+/// Shared motion vocabulary so every surface animates with the same rhythm.
+/// Durations climb in a consistent scale; curves favour a soft, "emphasized"
+/// deceleration (fast out, gentle settle) that reads as calm rather than
+/// bouncy. Keep transitions here so the whole app can be retuned in one place.
+class TalonMotion {
+  TalonMotion._();
+
+  /// Taps, toggles, small state flips.
+  static const Duration fast = Duration(milliseconds: 140);
+
+  /// The default for most transitions (pane swaps, entrances).
+  static const Duration base = Duration(milliseconds: 240);
+
+  /// Larger, more deliberate moves (expanding panels, first paint).
+  static const Duration slow = Duration(milliseconds: 360);
+
+  /// Standard deceleration — fast to start, easing gently into place.
+  static const Curve emphasized = Curves.easeOutCubic;
+
+  /// Symmetric ease for reversible states (selected ⇄ idle).
+  static const Curve standard = Curves.easeInOutCubic;
+}
+
 ThemeData buildTalonTheme() {
   final base = ThemeData.dark(useMaterial3: true);
   const accent = TalonColors.accent;

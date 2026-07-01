@@ -29,8 +29,11 @@ export type ChatEntry = {
   preview: string;
 };
 
+/** The placeholder title a chat carries until it earns a real one. */
+export const DEFAULT_CHAT_TITLE = "New chat";
+
 function defaultTitle(): string {
-  return "New chat";
+  return DEFAULT_CHAT_TITLE;
 }
 
 export class NativeChats {

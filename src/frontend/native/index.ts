@@ -21,25 +21,35 @@ import type { Gateway } from "../../core/engine/gateway.js";
 import { log } from "../../util/log.js";
 import { execute } from "../../core/engine/dispatcher.js";
 import { toolInputToRecord } from "../../core/agent-runtime/events.js";
-import { pushMessage, getRecentHistory } from "../../storage/history.js";
+import {
+  pushMessage,
+  getRecentHistory,
+  clearHistory,
+} from "../../storage/history.js";
 import {
   getChatSettings,
   setChatEffort,
   setChatModelForBackend,
   getChatModelForBackend,
+  setChatBackend,
   setChatPulse,
   EFFORT_LEVELS,
   type EffortLevel,
 } from "../../storage/chat-settings.js";
 import { resetSession } from "../../storage/sessions.js";
+import { resetPulseCheckpoint } from "../../core/background/pulse.js";
 import { configSnapshot, applyConfigUpdate } from "./settings.js";
 import { getModels, resolveModel } from "../../core/models/catalog.js";
 import {
   getBackendForChat,
   getBackendIdForChat,
+  listAvailableBackends,
+  rebindChat,
+  releaseChat,
 } from "../../core/engine/backend-controller/index.js";
 import { getActiveReasoningLevels } from "../shared/reasoning-levels.js";
-import { NativeChats, type ChatEntry } from "./chats.js";
+import { NativeChats, DEFAULT_CHAT_TITLE, type ChatEntry } from "./chats.js";
+import { extractSessionName } from "../../backend/shared/session-name.js";
 import { BridgeServer, type BridgeServerHandlers } from "./server.js";
 import { createNativeActionHandler } from "./actions.js";
 import {
@@ -47,6 +57,7 @@ import {
   BOT_SENDER_ID,
   USER_SENDER_ID,
   historyToClientMessage,
+  type BackendOption,
   type BridgeEvent,
   type BridgeStatus,
   type ClientButton,
@@ -84,11 +95,12 @@ export function createNativeFrontend(
   function toClientChat(entry: ChatEntry): ClientChat {
     const settings = getChatSettings(entry.id);
     let model: string | undefined;
+    let backend: string | undefined;
     try {
-      const backendId = getBackendIdForChat(entry.id);
-      model = getChatModelForBackend(entry.id, backendId);
+      backend = getBackendIdForChat(entry.id);
+      model = getChatModelForBackend(entry.id, backend);
     } catch {
-      /* backend pool not ready (early boot) — omit model */
+      /* backend pool not ready (early boot) — omit model/backend */
     }
     return {
       id: entry.id,
@@ -97,6 +109,7 @@ export function createNativeFrontend(
       lastActive: entry.lastActive,
       preview: entry.preview,
       model,
+      backend,
       effort: settings.effort,
       pulse: settings.pulse,
     };
@@ -106,6 +119,22 @@ export function createNativeFrontend(
 
   const broadcastChatUpdated = (entry: ChatEntry): void =>
     broadcast({ kind: "chat_updated", chat: toClientChat(entry) });
+
+  /**
+   * Name a chat from its first user message — instantly and for free.
+   *
+   * The title is a trimmed slice of the first message (no model call), so it
+   * lands the moment the user hits send instead of staying "New chat" until
+   * the turn finishes and a restart re-hydrates the persisted name. Only fires
+   * while the chat still carries the placeholder title, so a user's manual
+   * rename is never clobbered. Callers broadcast `chat_updated` afterwards, so
+   * the change propagates to every connected client live.
+   */
+  function maybeAutoTitle(entry: ChatEntry, text: string): void {
+    if (entry.title && entry.title !== DEFAULT_CHAT_TITLE) return;
+    const title = extractSessionName(text);
+    if (title) chats.rename(entry.id, title);
+  }
 
   // ── Outbound message helpers (persist + broadcast) ───────────────────────
 
@@ -137,7 +166,9 @@ export function createNativeFrontend(
     return id;
   }
 
-  function emitUser(entry: ChatEntry, text: string): void {
+  /** Persist + broadcast a user message; returns its numeric id so the turn
+   *  hands the model that same id (as `[msg_id:N]`) to react/reply to. */
+  function emitUser(entry: ChatEntry, text: string): number {
     const id = nextId();
     const ts = Date.now();
     const message: ClientMessage = {
@@ -155,8 +186,10 @@ export function createNativeFrontend(
       timestamp: ts,
     });
     chats.touch(entry.id, text);
+    maybeAutoTitle(entry, text);
     broadcast({ kind: "message", chatId: entry.id, message });
     broadcastChatUpdated(entry);
+    return id;
   }
 
   /** Transient, non-persisted notice (e.g. "session reset"). */
@@ -176,7 +209,11 @@ export function createNativeFrontend(
 
   // ── A user turn ──────────────────────────────────────────────────────────
 
-  async function runTurn(entry: ChatEntry, text: string): Promise<void> {
+  async function runTurn(
+    entry: ChatEntry,
+    text: string,
+    messageId: number,
+  ): Promise<void> {
     const start = Date.now();
     try {
       const result = await execute({
@@ -185,6 +222,9 @@ export function createNativeFrontend(
         prompt: text,
         senderName: "User",
         isGroup: false,
+        // Give the model the user message's id so `[msg_id:N]` is present and
+        // react/reply/edit target the user's message — not the bot's.
+        messageId,
         source: "message",
         onEvent: async (event) => {
           switch (event.type) {
@@ -278,14 +318,28 @@ export function createNativeFrontend(
     };
   }
 
-  function listModels(): { active: string; models: ModelOption[] } {
+  function listModels(chatId?: string): {
+    active: string;
+    models: ModelOption[];
+  } {
     const models: ModelOption[] = getModels().map((m) => ({
       id: m.id,
       displayName: m.displayName,
       provider: m.provider,
       reasoning: Boolean(m.supportedReasoningLevels?.length),
     }));
-    return { active: config.model, models };
+    // Prefer the chat's own resolved model as the "active" hint; fall back to
+    // the global default when the chat has no per-backend pick yet.
+    let active = config.model;
+    if (chatId) {
+      try {
+        const backendId = getBackendIdForChat(chatId);
+        active = getChatModelForBackend(chatId, backendId) ?? config.model;
+      } catch {
+        /* pool not ready — keep global default */
+      }
+    }
+    return { active, models };
   }
 
   function setModel(chatId: string, model: string): void {
@@ -294,6 +348,54 @@ export function createNativeFrontend(
     const backendId = getBackendIdForChat(chatId);
     setChatModelForBackend(chatId, backendId, model.trim() || undefined);
     broadcastChatUpdated(entry);
+  }
+
+  function listBackends(chatId: string): {
+    active: string;
+    backends: BackendOption[];
+  } {
+    const backends = listAvailableBackends(config);
+    let active: string = config.backend;
+    try {
+      if (chatId) active = getBackendIdForChat(chatId);
+    } catch {
+      /* pool not ready — report the global default backend */
+    }
+    return { active, backends };
+  }
+
+  /**
+   * Switch a chat to another backend. Mirrors the Telegram `/model` backend
+   * submenu: verify the target is enabled, rebind the chat's pool holder, pin
+   * the override, and drop the previous backend's per-chat session state
+   * (sessions aren't portable across backends). Per-backend model picks are
+   * kept, so switching back restores the prior model automatically.
+   */
+  async function setBackend(
+    chatId: string,
+    backend: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const entry = chats.get(chatId);
+    if (!entry) return { ok: false, error: "No such chat" };
+    const target = backend.trim();
+    const available = listAvailableBackends(config);
+    if (!available.some((b) => b.id === target)) {
+      return { ok: false, error: "Backend not available" };
+    }
+    if (getBackendIdForChat(chatId) === target) return { ok: true };
+
+    const result = await rebindChat(chatId, target, config);
+    if (!result.ok) {
+      return { ok: false, error: result.error ?? "Rebind failed" };
+    }
+    setChatBackend(chatId, target);
+    resetSession(chatId);
+    clearHistory(chatId);
+    resetPulseCheckpoint(chatId);
+    emitSystem(entry, `Switched to ${target} — starting a fresh conversation.`);
+    broadcastChatUpdated(entry);
+    broadcast({ kind: "status", status: status() });
+    return { ok: true };
   }
 
   function setEffort(chatId: string, effort: string): void {
@@ -354,13 +456,15 @@ export function createNativeFrontend(
         .sort((a, b) => Number(a.id) - Number(b.id)),
     send: (id, text) => {
       const entry = chats.get(id) ?? chats.ensure(id);
-      emitUser(entry, text);
+      const messageId = emitUser(entry, text);
       broadcast({ kind: "turn_start", chatId: entry.id });
       broadcast({ kind: "typing", chatId: entry.id, on: true });
-      void runTurn(entry, text);
+      void runTurn(entry, text, messageId);
     },
     listModels,
     setModel,
+    listBackends,
+    setBackend,
     setEffort,
     effortLevels,
     resetChat: (id) => {

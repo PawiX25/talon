@@ -5,8 +5,12 @@ plugins {
 }
 
 android {
-    namespace = "com.example.talon_companion"
-    compileSdk = flutter.compileSdkVersion
+    namespace = "org.talon.companion"
+    // Pinned to 36 (not flutter.compileSdkVersion, currently 34) because
+    // file_picker's transitive flutter_plugin_android_lifecycle requires
+    // compiling against API 36+. compileSdk only governs which APIs are
+    // available at compile time; minSdk/targetSdk are unchanged.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -16,7 +20,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.talon_companion"
+        applicationId = "org.talon.companion"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

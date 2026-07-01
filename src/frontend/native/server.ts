@@ -18,9 +18,13 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { extname } from "node:path";
 import { log, logError, logDebug } from "../../util/log.js";
 import {
   BRIDGE_PROTOCOL_VERSION,
+  type BackendOption,
   type BridgeEvent,
   type BridgeStatus,
   type ClientChat,
@@ -28,6 +32,14 @@ import {
   type ModelOption,
 } from "./protocol.js";
 import type { ConfigSnapshot } from "./settings.js";
+
+/** Optional attachment references carried alongside a sent message. */
+export type SendOptions = {
+  /** Relative bridge path to render inline (e.g. `/media?id=…`). */
+  imagePath?: string;
+  /** Absolute on-disk path handed to the model so it can read the file. */
+  attachmentPath?: string;
+};
 
 /** Everything the transport needs the frontend to implement. */
 export type BridgeServerHandlers = {
@@ -38,9 +50,22 @@ export type BridgeServerHandlers = {
   deleteChat(id: string): boolean;
   history(id: string): ClientMessage[];
   /** Fire-and-forget: streams its results back through `broadcast`. */
-  send(id: string, text: string): void;
-  listModels(): { active: string; models: ModelOption[] };
+  send(id: string, text: string, opts?: SendOptions): void;
+  /** Persist an uploaded image and return its render path + on-disk path. */
+  upload(
+    filename: string,
+    contentType: string,
+    bytes: Buffer,
+  ): Promise<{ imagePath: string; path: string }>;
+  listModels(id?: string): { active: string; models: ModelOption[] };
   setModel(id: string, model: string): void;
+  /** Backends selectable for a chat + the chat's active backend id. */
+  listBackends(id: string): { active: string; backends: BackendOption[] };
+  /** Switch a chat to another backend; returns ok + an optional error. */
+  setBackend(
+    id: string,
+    backend: string,
+  ): Promise<{ ok: boolean; error?: string }>;
   setEffort(id: string, effort: string): void;
   effortLevels(id: string): Promise<{ active: string; levels: string[] }>;
   resetChat(id: string): boolean;
@@ -49,10 +74,13 @@ export type BridgeServerHandlers = {
   getConfig(): ConfigSnapshot;
   /** Change daemon settings; returns the fresh snapshot. */
   setConfig(update: Record<string, unknown>): ConfigSnapshot;
+  /** Resolve a media id to an absolute file path (or null if unknown). */
+  mediaPath(id: string): string | null;
 };
 
 const SSE_PING_MS = 25_000;
 const MAX_BODY_BYTES = 256 * 1024;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const PORT_FALLBACKS = 5;
 
 export class BridgeServer {
@@ -259,17 +287,33 @@ export class BridgeServer {
         const body = await this.readJson(req);
         const id = asString(body.chatId) ?? "";
         const text = asString(body.text) ?? "";
-        if (!id || !text.trim())
+        const imagePath = asString(body.imagePath);
+        const attachmentPath = asString(body.attachmentPath);
+        // Text may be empty when an image is attached; require one or the other.
+        if (!id || (!text.trim() && !attachmentPath))
           return this.json(res, 400, {
             ok: false,
-            error: "chatId and text required",
+            error: "chatId and text (or an attachment) required",
           });
-        this.handlers.send(id, text);
+        this.handlers.send(id, text, { imagePath, attachmentPath });
         return this.json(res, 202, { ok: true });
       }
 
-      if (method === "GET" && path === "/models")
-        return this.json(res, 200, this.handlers.listModels());
+      if (method === "POST" && path === "/upload") {
+        const filename = url.searchParams.get("filename") ?? "upload";
+        const contentType =
+          req.headers["content-type"] ?? "application/octet-stream";
+        const bytes = await this.readRaw(req, MAX_UPLOAD_BYTES);
+        if (!bytes.length)
+          return this.json(res, 400, { ok: false, error: "Empty upload" });
+        const result = await this.handlers.upload(filename, contentType, bytes);
+        return this.json(res, 200, { ok: true, ...result });
+      }
+
+      if (method === "GET" && path === "/models") {
+        const id = url.searchParams.get("chatId") ?? undefined;
+        return this.json(res, 200, this.handlers.listModels(id));
+      }
 
       if (method === "POST" && path === "/model") {
         const body = await this.readJson(req);
@@ -278,6 +322,22 @@ export class BridgeServer {
           asString(body.model) ?? "",
         );
         return this.json(res, 200, { ok: true });
+      }
+
+      if (method === "GET" && path === "/backends") {
+        const id = url.searchParams.get("chatId") ?? "";
+        return this.json(res, 200, this.handlers.listBackends(id));
+      }
+
+      if (method === "POST" && path === "/backend") {
+        const body = await this.readJson(req);
+        // Always 200: ok/error is an application result the client renders,
+        // not an HTTP-level failure (the client's decoder drops >=400 bodies).
+        const result = await this.handlers.setBackend(
+          asString(body.chatId) ?? "",
+          asString(body.backend) ?? "",
+        );
+        return this.json(res, 200, result);
       }
 
       if (method === "GET" && path === "/effort") {
@@ -294,6 +354,11 @@ export class BridgeServer {
         return this.json(res, 200, { ok: true });
       }
 
+      if (method === "GET" && path === "/media") {
+        const id = url.searchParams.get("id") ?? "";
+        return await this.serveMedia(res, id);
+      }
+
       if (method === "GET" && path === "/config")
         return this.json(res, 200, this.handlers.getConfig());
 
@@ -306,6 +371,34 @@ export class BridgeServer {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return this.json(res, 400, { ok: false, error: msg });
+    }
+  }
+
+  /** Stream an attached image by id. Auth is already enforced by `handle`. */
+  private async serveMedia(res: ServerResponse, id: string): Promise<void> {
+    const filePath = id ? this.handlers.mediaPath(id) : null;
+    if (!filePath) {
+      return this.json(res, 404, { ok: false, error: "No such media" });
+    }
+    try {
+      const info = await stat(filePath);
+      if (!info.isFile()) {
+        return this.json(res, 404, { ok: false, error: "No such media" });
+      }
+      res.writeHead(200, {
+        ...this.corsHeaders(),
+        "Content-Type": contentTypeFor(filePath),
+        "Content-Length": String(info.size),
+        "Cache-Control": "private, max-age=3600",
+      });
+      const stream = createReadStream(filePath);
+      stream.on("error", () => {
+        if (!res.headersSent) res.writeHead(500);
+        res.end();
+      });
+      stream.pipe(res);
+    } catch {
+      return this.json(res, 404, { ok: false, error: "No such media" });
     }
   }
 
@@ -363,6 +456,18 @@ export class BridgeServer {
     res.end(JSON.stringify(body));
   }
 
+  /** Read a raw request body (binary-safe) up to `max` bytes. */
+  private async readRaw(req: IncomingMessage, max: number): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of req) {
+      total += (chunk as Buffer).length;
+      if (total > max) throw new Error("Upload too large");
+      chunks.push(chunk as Buffer);
+    }
+    return Buffer.concat(chunks);
+  }
+
   private async readJson(
     req: IncomingMessage,
   ): Promise<Record<string, unknown>> {
@@ -385,4 +490,25 @@ export class BridgeServer {
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+/** Minimal image content-type map for the media endpoint. */
+function contentTypeFor(filePath: string): string {
+  switch (extname(filePath).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".bmp":
+      return "image/bmp";
+    case ".svg":
+      return "image/svg+xml";
+    default:
+      return "application/octet-stream";
+  }
 }

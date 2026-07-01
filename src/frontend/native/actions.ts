@@ -22,6 +22,8 @@ export type NativeActionDeps = {
     text: string,
     buttons?: ClientButton[][],
   ) => number;
+  /** Persist + broadcast an assistant photo message; returns its numeric id. */
+  emitPhoto: (entry: ChatEntry, filePath: string, caption?: string) => number;
   broadcast: (event: BridgeEvent) => void;
 };
 
@@ -53,7 +55,7 @@ function toButtons(rows: unknown): ClientButton[][] | undefined {
 export function createNativeActionHandler(
   deps: NativeActionDeps,
 ): FrontendActionHandler {
-  const { chats, gateway, emitAssistant, broadcast } = deps;
+  const { chats, gateway, emitAssistant, emitPhoto, broadcast } = deps;
 
   return async (body, chatId): Promise<ActionResult | null> => {
     const action = typeof body.action === "string" ? body.action : "";
@@ -71,6 +73,16 @@ export function createNativeActionHandler(
       case "send_message_with_buttons": {
         const text = String(body.text ?? "");
         const id = emitAssistant(entry, text, toButtons(body.rows));
+        gateway.incrementMessages(chatId);
+        return { ok: true, message_id: id };
+      }
+
+      case "send_photo": {
+        const filePath = String(body.file_path ?? "");
+        if (!filePath) return { ok: false, error: "file_path required" };
+        const caption =
+          typeof body.caption === "string" ? body.caption : undefined;
+        const id = emitPhoto(entry, filePath, caption);
         gateway.incrementMessages(chatId);
         return { ok: true, message_id: id };
       }

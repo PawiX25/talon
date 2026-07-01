@@ -41,6 +41,12 @@ export type ClientMessage = {
   ts: number;
   buttons?: ClientButton[][];
   reactions?: string[];
+  /**
+   * Relative bridge path to an attached image (e.g. `/media?id=…`). The
+   * client resolves it against its own base URL + token and renders it inline.
+   * Present on photo messages the bot sends; `text` carries any caption.
+   */
+  imagePath?: string;
 };
 
 /** A conversation in the sidebar. */
@@ -53,6 +59,8 @@ export type ClientChat = {
   preview: string;
   /** Resolved model id for this chat, when known. */
   model?: string;
+  /** Active backend id for this chat (e.g. "claude", "codex"), when known. */
+  backend?: string;
   /** Reasoning effort for this chat, when known. */
   effort?: string;
   /** Whether proactive pulse check-ins are enabled for this chat. */
@@ -77,6 +85,12 @@ export type ModelOption = {
   displayName: string;
   provider: string;
   reasoning: boolean;
+};
+
+/** A selectable backend for the picker (e.g. Claude SDK, Codex). */
+export type BackendOption = {
+  id: string;
+  label: string;
 };
 
 /**

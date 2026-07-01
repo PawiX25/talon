@@ -215,19 +215,62 @@ class AppState extends ChangeNotifier {
     // chat_deleted event reconciles state.
   }
 
-  Future<void> sendMessage(String text) async {
+  Future<void> sendMessage(
+    String text, {
+    String? imagePath,
+    String? attachmentPath,
+  }) async {
     final chatId = selectedChatId;
     final client = _client;
-    if (chatId == null || client == null || text.trim().isEmpty) return;
+    if (chatId == null || client == null) return;
+    // Text may be empty when an image is attached.
+    if (text.trim().isEmpty && attachmentPath == null) return;
     try {
-      await client.send(chatId, text.trim());
+      await client.send(
+        chatId,
+        text.trim(),
+        imagePath: imagePath,
+        attachmentPath: attachmentPath,
+      );
     } catch (e) {
       _appendSystem(chatId, 'Failed to send: $e');
     }
   }
 
+  /// Upload image bytes and return the render + on-disk paths, or null on
+  /// failure (a system note is appended so the user sees what happened).
+  Future<({String imagePath, String path})?> uploadImage(
+    List<int> bytes,
+    String filename,
+    String contentType,
+  ) async {
+    final client = _client;
+    if (client == null) return null;
+    try {
+      return await client.uploadImage(bytes, filename, contentType);
+    } catch (e) {
+      final chatId = selectedChatId;
+      if (chatId != null) _appendSystem(chatId, 'Upload failed: $e');
+      return null;
+    }
+  }
+
   Future<void> setModel(String chatId, String model) async {
     await _client?.setModel(chatId, model);
+  }
+
+  /// Backends selectable for a chat + the chat's active backend id.
+  Future<(String, List<BackendOption>)> backends(String chatId) async =>
+      await _client?.backends(chatId) ?? ('', const <BackendOption>[]);
+
+  /// Switch a chat's backend. Returns the daemon result so the UI can toast a
+  /// failure (e.g. "Backend not available") instead of silently no-op'ing.
+  Future<({bool ok, String? error})> setBackend(
+    String chatId,
+    String backend,
+  ) async {
+    final r = await _client?.setBackend(chatId, backend);
+    return r ?? (ok: false, error: 'Not connected');
   }
 
   Future<void> setEffort(String chatId, String effort) async {
@@ -479,9 +522,14 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _refreshModels() async {
+  /// Public: re-fetch the model catalog (optionally for a specific chat, so the
+  /// active-model hint reflects that chat's backend). Used after a backend
+  /// switch, where the newly-selected backend exposes a different model set.
+  Future<void> refreshModels([String? chatId]) => _refreshModels(chatId);
+
+  Future<void> _refreshModels([String? chatId]) async {
     try {
-      final r = await _client?.models();
+      final r = await _client?.models(chatId);
       if (r != null && !_disposed) {
         models = r.$2;
         notifyListeners();

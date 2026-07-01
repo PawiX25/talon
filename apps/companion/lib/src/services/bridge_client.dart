@@ -96,28 +96,28 @@ class BridgeClient {
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .listen(
-          (line) {
-            if (line.startsWith(':')) return; // keep-alive comment
-            if (line.isEmpty) {
-              _flush(buffer);
-              return;
-            }
-            if (line.startsWith('data:')) {
-              buffer.writeln(line.substring(5).trimLeft());
-            }
-          },
-          onError: (Object e) {
-            AppLog.warn('bridge', 'event stream error', e);
-            _events.addError(e);
-          },
-          onDone: () {
-            if (!_closed) {
-              AppLog.warn('bridge', 'event stream closed');
-              _events.addError(BridgeException('Stream closed'));
-            }
-          },
-          cancelOnError: true,
-        );
+      (line) {
+        if (line.startsWith(':')) return; // keep-alive comment
+        if (line.isEmpty) {
+          _flush(buffer);
+          return;
+        }
+        if (line.startsWith('data:')) {
+          buffer.writeln(line.substring(5).trimLeft());
+        }
+      },
+      onError: (Object e) {
+        AppLog.warn('bridge', 'event stream error', e);
+        _events.addError(e);
+      },
+      onDone: () {
+        if (!_closed) {
+          AppLog.warn('bridge', 'event stream closed');
+          _events.addError(BridgeException('Stream closed'));
+        }
+      },
+      cancelOnError: true,
+    );
   }
 
   void _flush(StringBuffer buffer) {
@@ -170,11 +170,46 @@ class BridgeClient {
     ).map((m) => ClientMessage.fromJson(_map(m))).toList();
   }
 
-  Future<void> send(String chatId, String text) =>
-      _postJson('/send', {'chatId': chatId, 'text': text});
+  Future<void> send(
+    String chatId,
+    String text, {
+    String? imagePath,
+    String? attachmentPath,
+  }) =>
+      _postJson('/send', {
+        'chatId': chatId,
+        'text': text,
+        if (imagePath != null) 'imagePath': imagePath,
+        if (attachmentPath != null) 'attachmentPath': attachmentPath,
+      });
 
-  Future<(String active, List<ModelOption> models)> models() async {
-    final j = await _getJson('/models');
+  /// Upload image bytes to the bridge. Returns the relative render path
+  /// (`/media?id=…`) and the absolute on-disk path handed to the model.
+  Future<({String imagePath, String path})> uploadImage(
+    List<int> bytes,
+    String filename,
+    String contentType,
+  ) async {
+    final res = await _http
+        .post(
+          _u('/upload', {'filename': filename}),
+          headers: config.authHeaders({'Content-Type': contentType}),
+          body: bytes,
+        )
+        .timeout(const Duration(seconds: 30));
+    final j = _decode(res);
+    return (
+      imagePath: j['imagePath']?.toString() ?? '',
+      path: j['path']?.toString() ?? '',
+    );
+  }
+
+  Future<(String active, List<ModelOption> models)> models([
+    String? chatId,
+  ]) async {
+    final j = await _getJson('/models', {
+      if (chatId != null) 'chatId': chatId,
+    });
     final list = _list(
       j['models'],
     ).map((m) => ModelOption.fromJson(_map(m))).toList();
@@ -183,6 +218,30 @@ class BridgeClient {
 
   Future<void> setModel(String chatId, String model) =>
       _postJson('/model', {'chatId': chatId, 'model': model});
+
+  Future<(String active, List<BackendOption> backends)> backends(
+    String chatId,
+  ) async {
+    final j = await _getJson('/backends', {'chatId': chatId});
+    final list = _list(
+      j['backends'],
+    ).map((b) => BackendOption.fromJson(_map(b))).toList();
+    return (j['active']?.toString() ?? '', list);
+  }
+
+  /// Switch a chat's backend. Returns the daemon's application result so the
+  /// caller can surface an error (e.g. "Backend not available") without the
+  /// request throwing.
+  Future<({bool ok, String? error})> setBackend(
+    String chatId,
+    String backend,
+  ) async {
+    final j = await _postJson('/backend', {
+      'chatId': chatId,
+      'backend': backend,
+    });
+    return (ok: j['ok'] == true, error: j['error']?.toString());
+  }
 
   Future<void> setEffort(String chatId, String effort) =>
       _postJson('/effort', {'chatId': chatId, 'effort': effort});
@@ -269,8 +328,8 @@ class BridgeException implements Exception {
   final bool unauthorized;
   BridgeException(this.message) : unauthorized = false;
   BridgeException.unauthorized()
-    : message = 'Unauthorized — check your token',
-      unauthorized = true;
+      : message = 'Unauthorized — check your token',
+        unauthorized = true;
   @override
   String toString() => message;
 }

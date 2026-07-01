@@ -57,6 +57,7 @@ import { NativeChats, DEFAULT_CHAT_TITLE, type ChatEntry } from "./chats.js";
 import { extractSessionName } from "../../backend/shared/session-name.js";
 import { BridgeServer, type BridgeServerHandlers } from "./server.js";
 import { createNativeActionHandler } from "./actions.js";
+import { removeBridgeDiscovery, writeBridgeDiscovery } from "./discovery.js";
 import {
   BRIDGE_PROTOCOL_VERSION,
   BOT_SENDER_ID,
@@ -694,6 +695,11 @@ export function createNativeFrontend(
       log("native", `Gateway on :${gatewayPort}`);
       chats.restore();
       await server.start();
+      await writeBridgeDiscovery({
+        port: server.getPort(),
+        token: nativeCfg.token,
+        startedAt: Date.parse(startedAt),
+      });
     },
 
     async start() {
@@ -704,6 +710,7 @@ export function createNativeFrontend(
     },
 
     async stop() {
+      await removeBridgeDiscovery();
       await server.stop();
       await gateway.stop();
     },

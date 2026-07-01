@@ -2,8 +2,8 @@ import 'dart:io' show Platform;
 
 /// How the companion reaches a Talon daemon.
 ///
-/// - On desktop the default is a *managed local* daemon: connect to
-///   `127.0.0.1`, and if nothing answers, launch one ourselves.
+/// - On desktop the default is zero-config local discovery: Talon writes
+///   `~/.talon/native-bridge.json`, and the app reads host/port/token from it.
 /// - On mobile (or when pointing at another machine) it's a *remote* bridge:
 ///   a host/IP + port and, for anything off-loopback, a shared token.
 class ConnectionConfig {
@@ -19,6 +19,10 @@ class ConnectionConfig {
   /// Desktop only: try to spawn/attach a local daemon instead of assuming one.
   final bool manageLocalDaemon;
 
+  /// Desktop local mode: discover the running bridge from Talon's data dir
+  /// instead of launching a daemon or requiring host/port/token entry.
+  final bool localAutoDiscover;
+
   /// Command used to launch the daemon when [manageLocalDaemon] is on.
   /// Defaults to the globally-installed `talon` CLI on PATH.
   final String launchCommand;
@@ -30,6 +34,7 @@ class ConnectionConfig {
     this.token,
     this.tls = false,
     this.manageLocalDaemon = true,
+    this.localAutoDiscover = true,
     this.launchCommand = 'talon',
     this.launchArgs = const ['start'],
   });
@@ -39,7 +44,11 @@ class ConnectionConfig {
 
   /// We only ever supervise a daemon for a local, loopback connection.
   bool get canManageDaemon =>
-      manageLocalDaemon && isLoopback && _desktopPlatform;
+      manageLocalDaemon && !localAutoDiscover && isLoopback && _desktopPlatform;
+
+  /// Zero-config discovery is only meaningful for same-machine desktop mode.
+  bool get canAutoDiscoverLocal =>
+      localAutoDiscover && isLoopback && _desktopPlatform;
 
   String get scheme => tls ? 'https' : 'http';
 
@@ -76,6 +85,7 @@ class ConnectionConfig {
     bool clearToken = false,
     bool? tls,
     bool? manageLocalDaemon,
+    bool? localAutoDiscover,
     String? launchCommand,
     List<String>? launchArgs,
   }) =>
@@ -85,6 +95,7 @@ class ConnectionConfig {
         token: clearToken ? null : (token ?? this.token),
         tls: tls ?? this.tls,
         manageLocalDaemon: manageLocalDaemon ?? this.manageLocalDaemon,
+        localAutoDiscover: localAutoDiscover ?? this.localAutoDiscover,
         launchCommand: launchCommand ?? this.launchCommand,
         launchArgs: launchArgs ?? this.launchArgs,
       );
@@ -95,6 +106,7 @@ class ConnectionConfig {
         'token': token,
         'tls': tls,
         'manageLocalDaemon': manageLocalDaemon,
+        'localAutoDiscover': localAutoDiscover,
         'launchCommand': launchCommand,
         'launchArgs': launchArgs,
       };
@@ -105,6 +117,7 @@ class ConnectionConfig {
         token: j['token'] as String?,
         tls: (j['tls'] ?? false) as bool,
         manageLocalDaemon: (j['manageLocalDaemon'] ?? true) as bool,
+        localAutoDiscover: (j['localAutoDiscover'] ?? true) as bool,
         launchCommand: (j['launchCommand'] ?? 'talon') as String,
         launchArgs: ((j['launchArgs'] as List?) ?? const ['start'])
             .map((e) => e.toString())
@@ -153,10 +166,11 @@ class ConnectionConfig {
     return HostInput(host: s.trim(), port: port, tls: tls);
   }
 
-  /// First-run default tuned to the platform: desktop manages a local daemon;
+  /// First-run default tuned to the platform: desktop discovers local Talon;
   /// mobile starts in remote mode (the user supplies a host + token).
   factory ConnectionConfig.defaults() => ConnectionConfig(
         manageLocalDaemon: _desktopPlatform,
+        localAutoDiscover: _desktopPlatform,
       );
 }
 

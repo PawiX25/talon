@@ -6,6 +6,7 @@ import '../models/bridge_models.dart';
 import '../models/connection.dart';
 import '../services/bridge_client.dart';
 import '../services/daemon_supervisor.dart';
+import '../services/local_discovery.dart';
 import '../services/log.dart';
 import '../services/prefs.dart';
 
@@ -75,14 +76,39 @@ class AppState extends ChangeNotifier {
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-  /// Connect using the current [config]: on desktop, ensure a daemon is up
-  /// first; everywhere, open the event stream and load chats.
+  /// Connect using the current [config]: local desktop mode discovers Talon's
+  /// bridge file first; legacy managed mode can still supervise a daemon when
+  /// explicitly configured; everywhere, open the event stream and load chats.
   Future<void> start() async {
     _reconnect?.cancel();
     AppLog.info('app_state', 'connect attempt ${config.host}:${config.port}');
     _setConn(ConnState.connecting, null);
 
-    if (config.canManageDaemon) {
+    if (config.canAutoDiscoverLocal) {
+      daemon = const DaemonState(DaemonPhase.unknown);
+      final bridge = await readLocalBridge();
+      if (bridge == null) {
+        _setConn(
+          ConnState.error,
+          "Talon isn't running on this computer — start Talon and it'll connect automatically.",
+        );
+        _scheduleReconnect();
+        return;
+      }
+      final effective = config.copyWith(
+        host: '127.0.0.1',
+        port: bridge.port,
+        token: bridge.token,
+        clearToken: bridge.token == null,
+        tls: bridge.scheme == 'https',
+        manageLocalDaemon: false,
+      );
+      AppLog.info(
+        'app_state',
+        'local discovery ${effective.host}:${effective.port}',
+      );
+      await _openStream(effective);
+    } else if (config.canManageDaemon) {
       _supervisor = DaemonSupervisor(config);
       final ok = await _supervisor!.ensureRunning((d) {
         daemon = d;
@@ -97,17 +123,18 @@ class AppState extends ChangeNotifier {
         _scheduleReconnect();
         return;
       }
+      await _openStream();
     } else {
       daemon = const DaemonState(DaemonPhase.unknown);
+      await _openStream();
     }
-
-    await _openStream();
   }
 
-  Future<void> _openStream() async {
+  Future<void> _openStream([ConnectionConfig? effectiveConfig]) async {
     await _sub?.cancel();
     _client?.dispose();
-    final client = BridgeClient(config);
+    final activeConfig = effectiveConfig ?? config;
+    final client = BridgeClient(activeConfig);
     _client = client;
 
     try {
@@ -117,7 +144,7 @@ class AppState extends ChangeNotifier {
       AppLog.info('app_state', 'health ${h == null ? 'failed' : 'ok'}');
       if (h == null) {
         throw BridgeException(
-          'No Talon bridge at ${config.host}:${config.port}',
+          'No Talon bridge at ${activeConfig.host}:${activeConfig.port}',
         );
       }
 

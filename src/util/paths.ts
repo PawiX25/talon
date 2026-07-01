@@ -86,6 +86,8 @@ export const files = {
   userSession: resolve(TALON_ROOT, ".user-session"),
   /** PID file for daemon mode: ~/.talon/talon.pid */
   pid: resolve(TALON_ROOT, "talon.pid"),
+  /** Native bridge discovery file for same-machine clients: ~/.talon/native-bridge.json */
+  nativeBridge: resolve(TALON_ROOT, "native-bridge.json"),
   /** MemPalace venv python binary (platform-dependent: bin/python on Unix, Scripts/python.exe on Windows) */
   mempalacePython: resolve(
     TALON_ROOT,

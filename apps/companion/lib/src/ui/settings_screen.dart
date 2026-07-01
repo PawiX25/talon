@@ -339,7 +339,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final s = widget.state;
     final cfg = _cfg;
     final buf = StringBuffer()
-      ..writeln('Talon companion diagnostics')
+      ..writeln('Talon diagnostics')
       ..writeln('connection: ${s.conn.name}')
       ..writeln('endpoint: ${s.config.baseUrl}')
       ..writeln(

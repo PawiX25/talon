@@ -10,7 +10,7 @@
          it does for those. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application android:usesCleartextTraffic="true"
-        android:label="talon_companion"
+        android:label="Talon"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

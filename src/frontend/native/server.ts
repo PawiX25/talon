@@ -57,7 +57,11 @@ export type BridgeServerHandlers = {
     contentType: string,
     bytes: Buffer,
   ): Promise<{ imagePath: string; path: string }>;
-  listModels(id?: string): { active: string; models: ModelOption[] };
+  listModels(
+    id?: string,
+  ):
+    | { active: string; models: ModelOption[] }
+    | Promise<{ active: string; models: ModelOption[] }>;
   setModel(id: string, model: string): void;
   /** Backends selectable for a chat + the chat's active backend id. */
   listBackends(id: string): { active: string; backends: BackendOption[] };
@@ -312,7 +316,7 @@ export class BridgeServer {
 
       if (method === "GET" && path === "/models") {
         const id = url.searchParams.get("chatId") ?? undefined;
-        return this.json(res, 200, this.handlers.listModels(id));
+        return this.json(res, 200, await this.handlers.listModels(id));
       }
 
       if (method === "POST" && path === "/model") {

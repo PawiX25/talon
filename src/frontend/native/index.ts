@@ -42,10 +42,12 @@ import {
 import { resetSession } from "../../storage/sessions.js";
 import { resetPulseCheckpoint } from "../../core/background/pulse.js";
 import { configSnapshot, applyConfigUpdate } from "./settings.js";
-import { getModels, resolveModel } from "../../core/models/catalog.js";
+import { resolveModel } from "../../core/models/catalog.js";
 import {
   getBackendForChat,
   getBackendIdForChat,
+  getPooledBackend,
+  acquireBackendInstance,
   listAvailableBackends,
   rebindChat,
   releaseChat,
@@ -214,13 +216,17 @@ export function createNativeFrontend(
       ts,
       imagePath: `/media?id=${encodeURIComponent(mediaId)}`,
     };
-    // History can't carry the live image, so persist a legible placeholder.
+    // Persist the image reference so it re-renders when history reloads (the
+    // filePath is re-registered into the media map on read). The caption is
+    // stored as plain text; the `photo` mediaType carries the image marker.
     pushMessage(entry.id, {
       msgId: id,
       senderId: BOT_SENDER_ID,
       senderName: botName,
-      text: text ? `[photo] ${text}` : "[photo]",
+      text,
       timestamp: ts,
+      mediaType: "photo",
+      filePath,
     });
     chats.touch(entry.id, text || "[photo]");
     broadcast({ kind: "message", chatId: entry.id, message });
@@ -235,6 +241,7 @@ export function createNativeFrontend(
     entry: ChatEntry,
     text: string,
     imagePath?: string,
+    attachmentPath?: string,
   ): number {
     const id = nextId();
     const ts = Date.now();
@@ -246,19 +253,23 @@ export function createNativeFrontend(
       ts,
       ...(imagePath ? { imagePath } : {}),
     };
-    const historyText = imagePath
-      ? text
-        ? `[photo] ${text}`
-        : "[photo]"
-      : text;
+    // For an attached image, persist the on-disk path + a `photo` mediaType so
+    // it re-renders on history reload (rehydrated in the `history` handler)
+    // instead of vanishing to a text-only placeholder. Caption stays as text.
     pushMessage(entry.id, {
       msgId: id,
       senderId: USER_SENDER_ID,
       senderName: "User",
-      text: historyText,
+      text,
       timestamp: ts,
+      ...(imagePath
+        ? {
+            mediaType: "photo" as const,
+            ...(attachmentPath ? { filePath: attachmentPath } : {}),
+          }
+        : {}),
     });
-    chats.touch(entry.id, historyText);
+    chats.touch(entry.id, imagePath ? text || "[photo]" : text);
     maybeAutoTitle(entry, text);
     broadcast({ kind: "message", chatId: entry.id, message });
     broadcastChatUpdated(entry);
@@ -396,28 +407,70 @@ export function createNativeFrontend(
     };
   }
 
-  function listModels(chatId?: string): {
+  async function listModels(chatId?: string): Promise<{
     active: string;
     models: ModelOption[];
-  } {
-    const models: ModelOption[] = getModels().map((m) => ({
-      id: m.id,
-      displayName: m.displayName,
-      provider: m.provider,
-      reasoning: Boolean(m.supportedReasoningLevels?.length),
-    }));
-    // Prefer the chat's own resolved model as the "active" hint; fall back to
-    // the global default when the chat has no per-backend pick yet.
+  }> {
+    // Resolve the chat's *own* backend so the model list tracks whatever
+    // backend the chat is currently bound to (fixes the list staying on the
+    // previous backend's models after a switch). Fall back to the global
+    // default backend when there's no chat / the pool isn't ready yet.
+    let backendId: string = config.backend;
     let active = config.model;
     if (chatId) {
       try {
-        const backendId = getBackendIdForChat(chatId);
+        backendId = getBackendIdForChat(chatId);
         active = getChatModelForBackend(chatId, backendId) ?? config.model;
       } catch {
-        /* pool not ready — keep global default */
+        /* pool not ready — keep global defaults */
       }
     }
-    return { active, models };
+
+    // Pull the models dynamically from the gateway for that backend. Prefer a
+    // live instance (the chat's backend, or one already pooled); otherwise
+    // boot the backend transiently to read its catalog, then release it so we
+    // never leak an instance — mirroring the shared `list_models` action.
+    let instance:
+      | Awaited<ReturnType<typeof acquireBackendInstance>>["backend"]
+      | null
+      | undefined;
+    try {
+      instance = chatId
+        ? getBackendForChat(chatId)
+        : getPooledBackend(backendId);
+    } catch {
+      instance = undefined;
+    }
+    let release: (() => Promise<void>) | null = null;
+    if (!instance) {
+      try {
+        const acquired = await acquireBackendInstance(backendId);
+        instance = acquired.backend;
+        release = acquired.release;
+      } catch {
+        return { active, models: [] };
+      }
+    }
+
+    try {
+      const catalog = instance.models;
+      if (!catalog?.listModels) return { active, models: [] };
+      const { models } = await catalog.listModels("all");
+      const options: ModelOption[] = models
+        .filter((m) => m.selectable)
+        .map((m) => ({
+          id: m.id,
+          displayName: m.displayName,
+          provider: m.provider,
+          reasoning:
+            Boolean(m.supportedReasoningLevels?.length) || Boolean(m.reasoning),
+        }));
+      return { active, models: options };
+    } catch {
+      return { active, models: [] };
+    } finally {
+      if (release) await release();
+    }
   }
 
   function setModel(chatId: string, model: string): void {
@@ -530,11 +583,26 @@ export function createNativeFrontend(
     },
     history: (id) =>
       getRecentHistory(id, 200)
-        .map((m) => historyToClientMessage(m, id))
+        .map((m) => {
+          const msg = historyToClientMessage(m, id);
+          // Re-hydrate an attached image: re-register its on-disk path into
+          // the media map and hand back a fresh /media URL so the image shows
+          // in reloaded history (survives restarts as long as the file exists).
+          if (m.mediaType === "photo" && m.filePath) {
+            const mediaId = registerMedia(m.filePath);
+            msg.imagePath = `/media?id=${encodeURIComponent(mediaId)}`;
+          }
+          return msg;
+        })
         .sort((a, b) => Number(a.id) - Number(b.id)),
     send: (id, text, opts) => {
       const entry = chats.get(id) ?? chats.ensure(id);
-      const messageId = emitUser(entry, text, opts?.imagePath);
+      const messageId = emitUser(
+        entry,
+        text,
+        opts?.imagePath,
+        opts?.attachmentPath,
+      );
       broadcast({ kind: "turn_start", chatId: entry.id });
       broadcast({ kind: "typing", chatId: entry.id, on: true });
       void runTurn(entry, text, messageId, opts?.attachmentPath);

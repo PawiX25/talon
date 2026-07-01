@@ -516,7 +516,13 @@ class AppState extends ChangeNotifier {
       ..addAll(list);
     _sortChats();
     selectedChatId ??= chats.isNotEmpty ? chats.first.id : null;
-    if (selectedChatId != null && !_loadedHistory.contains(selectedChatId)) {
+    // This runs on every (re)connect. History may have advanced while we were
+    // disconnected (a heartbeat/cron reply, another client, a network blip or
+    // laptop sleep), so drop the "already loaded" marks — otherwise a chat we'd
+    // viewed before would keep its stale message list forever. Re-fetch the
+    // visible chat now; the rest reload lazily when next opened.
+    _loadedHistory.clear();
+    if (selectedChatId != null) {
       await _loadHistory(selectedChatId!);
     }
     notifyListeners();
@@ -541,12 +547,19 @@ class AppState extends ChangeNotifier {
 
   Future<void> _loadHistory(String chatId) async {
     try {
-      final msgs = await _client?.history(chatId) ?? const [];
-      _messages[chatId] = msgs;
+      final hist = await _client?.history(chatId) ?? const [];
+      // Merge rather than overwrite: a live `message` event can land while this
+      // fetch is in flight, and a blind assignment would drop it (it isn't in
+      // the server snapshot yet). History is authoritative for order; append
+      // any newer live messages not already present, deduped by id.
+      final histIds = hist.map((m) => m.id).toSet();
+      final extras = (_messages[chatId] ?? const <ClientMessage>[])
+          .where((m) => !histIds.contains(m.id));
+      _messages[chatId] = [...hist, ...extras];
       _loadedHistory.add(chatId);
       notifyListeners();
     } catch (_) {
-      /* leave empty; stream will fill in */
+      /* leave existing messages; stream will fill in */
     }
   }
 

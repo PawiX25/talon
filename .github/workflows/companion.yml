@@ -111,6 +111,20 @@ jobs:
         if: matrix.platform == 'windows' || matrix.platform == 'linux'
         run: flutter create --platforms=${{ matrix.platform }} --project-name=talon_companion .
 
+      # The dart package stays talon_companion (valid identifier), but the
+      # user-facing native window title should read "Talon". These runner
+      # files are regenerated above, so patch the title constant here rather
+      # than committing it. Non-fatal so a template change never breaks a build.
+      - name: Set desktop window title to Talon
+        if: matrix.platform == 'windows' || matrix.platform == 'linux'
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            sed -i 's/"talon_companion"/"Talon"/g' linux/runner/my_application.cc || true
+          else
+            sed -i 's/L"talon_companion"/L"Talon"/g' windows/runner/main.cpp || true
+          fi
+
       - name: Build
         run: ${{ matrix.build }}
 

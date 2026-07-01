@@ -85,9 +85,7 @@ class _ComposerState extends State<Composer> {
                     isCollapsed: true,
                     border: InputBorder.none,
                     contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                    hintText: widget.enabled
-                        ? 'Message Talon…'
-                        : 'Connecting…',
+                    hintText: widget.enabled ? 'Message Talon…' : 'Connecting…',
                     hintStyle: const TextStyle(color: TalonColors.textFaint),
                   ),
                 ),
@@ -102,30 +100,61 @@ class _ComposerState extends State<Composer> {
   }
 }
 
-class _SendButton extends StatelessWidget {
+class _SendButton extends StatefulWidget {
   final bool enabled;
   final VoidCallback onTap;
   const _SendButton({required this.enabled, required this.onTap});
 
   @override
+  State<_SendButton> createState() => _SendButtonState();
+}
+
+class _SendButtonState extends State<_SendButton> {
+  bool _pressed = false;
+
+  @override
   Widget build(BuildContext context) {
-    return AnimatedOpacity(
-      duration: const Duration(milliseconds: 150),
-      opacity: enabled ? 1 : 0.4,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: enabled ? onTap : null,
-          borderRadius: BorderRadius.circular(13),
-          child: Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              gradient: TalonColors.accentGradient,
-              borderRadius: BorderRadius.circular(13),
-            ),
-            child: const Icon(Icons.arrow_upward_rounded,
-                color: Colors.white, size: 20),
+    final enabled = widget.enabled;
+    // Springs up to full size + full colour when there's something to send,
+    // dips slightly under the finger, and softens to a flat idle state when
+    // the field is empty — a small but legible bit of life.
+    return GestureDetector(
+      onTapDown: enabled ? (_) => setState(() => _pressed = true) : null,
+      onTapUp: enabled ? (_) => setState(() => _pressed = false) : null,
+      onTapCancel: enabled ? () => setState(() => _pressed = false) : null,
+      onTap: enabled ? widget.onTap : null,
+      child: AnimatedScale(
+        scale: _pressed
+            ? 0.88
+            : enabled
+                ? 1.0
+                : 0.9,
+        duration: TalonMotion.fast,
+        curve: TalonMotion.emphasized,
+        child: AnimatedContainer(
+          duration: TalonMotion.base,
+          curve: TalonMotion.standard,
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            gradient: enabled ? TalonColors.accentGradient : null,
+            color: enabled ? null : TalonColors.surfaceHi,
+            borderRadius: BorderRadius.circular(13),
+            boxShadow: enabled
+                ? [
+                    BoxShadow(
+                      color: TalonColors.accent.withValues(alpha: 0.35),
+                      blurRadius: 14,
+                      spreadRadius: -2,
+                      offset: const Offset(0, 3),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Icon(
+            Icons.arrow_upward_rounded,
+            color: enabled ? Colors.white : TalonColors.textFaint,
+            size: 20,
           ),
         ),
       ),

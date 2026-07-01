@@ -214,6 +214,7 @@ class _ChatTile extends StatefulWidget {
 
 class _ChatTileState extends State<_ChatTile> {
   bool _hover = false;
+  bool _pressed = false;
 
   @override
   Widget build(BuildContext context) {
@@ -223,40 +224,67 @@ class _ChatTileState extends State<_ChatTile> {
       onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(
         onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 130),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            color: selected
-                ? TalonColors.surfaceHi
-                : (_hover ? TalonColors.surface : Colors.transparent),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  widget.chat.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                    color: selected ? TalonColors.text : TalonColors.textDim,
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        child: AnimatedScale(
+          scale: _pressed ? 0.975 : 1.0,
+          duration: TalonMotion.fast,
+          curve: TalonMotion.emphasized,
+          child: AnimatedContainer(
+            duration: TalonMotion.fast,
+            curve: TalonMotion.standard,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              color: selected
+                  ? TalonColors.surfaceHi
+                  : (_hover ? TalonColors.surface : Colors.transparent),
+            ),
+            child: Row(
+              children: [
+                // A slim accent bar slides in on the selected tile.
+                AnimatedContainer(
+                  duration: TalonMotion.base,
+                  curve: TalonMotion.emphasized,
+                  width: selected ? 3 : 0,
+                  height: 15,
+                  margin: EdgeInsets.only(right: selected ? 9 : 0),
+                  decoration: BoxDecoration(
+                    gradient: TalonColors.accentGradient,
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-              ),
-              if (_hover || selected)
-                InkWell(
-                  onTap: widget.onDelete,
-                  borderRadius: BorderRadius.circular(6),
-                  child: const Padding(
-                    padding: EdgeInsets.all(2),
-                    child: Icon(Icons.close,
-                        size: 15, color: TalonColors.textFaint),
+                Expanded(
+                  child: Text(
+                    widget.chat.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                      color: selected ? TalonColors.text : TalonColors.textDim,
+                    ),
                   ),
                 ),
-            ],
+                AnimatedOpacity(
+                  duration: TalonMotion.fast,
+                  opacity: (_hover || selected) ? 1 : 0,
+                  child: IgnorePointer(
+                    ignoring: !(_hover || selected),
+                    child: InkWell(
+                      onTap: widget.onDelete,
+                      borderRadius: BorderRadius.circular(6),
+                      child: const Padding(
+                        padding: EdgeInsets.all(2),
+                        child: Icon(Icons.close,
+                            size: 15, color: TalonColors.textFaint),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

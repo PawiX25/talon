@@ -156,8 +156,9 @@ class _ToolChipState extends State<ToolChip>
             child: child,
           );
         },
+        // The name + arg share the flexible middle and ellipsize when long,
+        // so the elapsed-time readout on the right is pinned and never clips.
         child: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
             SizedBox(
               width: 14,
@@ -181,33 +182,48 @@ class _ToolChipState extends State<ToolChip>
               ),
             ),
             const SizedBox(width: 9),
-            Text(
-              tool.name,
-              style: const TextStyle(
-                color: TalonColors.text,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                fontFamily: 'monospace',
+            Expanded(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      _displayName(tool.name),
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: TalonColors.text,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ),
+                  if (_arg(tool) != null) ...[
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        _arg(tool)!,
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: TalonColors.textFaint,
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
-            if (_arg(tool) != null) ...[
-              const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  _arg(tool)!,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: TalonColors.textFaint,
-                    fontSize: 12,
-                    fontFamily: 'monospace',
-                  ),
-                ),
-              ),
-            ],
             const SizedBox(width: 10),
             Text(
               _fmt(tool.elapsed),
+              maxLines: 1,
+              softWrap: false,
               style: const TextStyle(
                 color: TalonColors.textFaint,
                 fontSize: 11.5,
@@ -218,6 +234,21 @@ class _ToolChipState extends State<ToolChip>
         ),
       ),
     );
+  }
+
+  /// De-noise MCP tool names for display:
+  /// `mcp__email-tools__search_emails` → `email · search_emails`.
+  /// Non-MCP names (e.g. `Bash`, `Read`) are shown as-is.
+  String _displayName(String raw) {
+    if (!raw.startsWith('mcp__')) return raw;
+    final parts = raw.substring(5).split('__');
+    if (parts.length < 2) return raw;
+    var server = parts.first;
+    if (server.endsWith('-tools')) {
+      server = server.substring(0, server.length - '-tools'.length);
+    }
+    final tool = parts.sublist(1).join('__');
+    return '$server · $tool';
   }
 
   String? _arg(ToolActivity t) {

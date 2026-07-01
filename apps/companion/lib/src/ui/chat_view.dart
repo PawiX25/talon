@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
 import '../models/bridge_models.dart';
@@ -41,10 +42,59 @@ class _ChatViewState extends State<ChatView> {
   String? _anchoredChatId;
   bool _pendingJumpToBottom = false;
 
+  /// Whether the user has scrolled up into history far enough that a
+  /// jump-to-latest affordance is useful.
+  bool _awayFromBottom = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScrolled);
+  }
+
   @override
   void dispose() {
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onScrolled() {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final away = pos.maxScrollExtent - pos.pixels > 420;
+    if (away != _awayFromBottom) setState(() => _awayFromBottom = away);
+    // Nearing the top of loaded scrollback → pull the previous page in.
+    if (pos.pixels < 240 && !_pendingJumpToBottom) _maybeLoadOlder();
+  }
+
+  /// Fetch the page above the current scrollback and keep the viewport
+  /// anchored on the row the user was looking at (prepending grows
+  /// maxScrollExtent; jump by the delta so nothing visibly shifts).
+  Future<void> _maybeLoadOlder() async {
+    final chatId = _anchoredChatId;
+    if (chatId == null) return;
+    final state = widget.state;
+    if (state.isLoadingOlder(chatId) || !state.hasMoreHistory(chatId)) return;
+    final extentBefore =
+        _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
+    final pixelsBefore = _scroll.hasClients ? _scroll.position.pixels : 0.0;
+    final added = await state.loadOlderMessages(chatId);
+    if (added > 0 && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scroll.hasClients) return;
+        final delta = _scroll.position.maxScrollExtent - extentBefore;
+        if (delta > 0) _scroll.jumpTo(pixelsBefore + delta);
+      });
+    }
+  }
+
+  void _jumpToLatest() {
+    if (!_scroll.hasClients) return;
+    _scroll.animateTo(
+      _scroll.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   /// A row animates in only the first time we see it AND when it's genuinely
@@ -106,6 +156,8 @@ class _ChatViewState extends State<ChatView> {
                   showBack: widget.showBack,
                   onBack: widget.onBack,
                 ),
+                if (widget.state.conn != ConnState.connected)
+                  _ConnBanner(state: widget.state),
                 Expanded(child: _messages(chat.id)),
                 Center(
                   child: ConstrainedBox(
@@ -134,6 +186,10 @@ class _ChatViewState extends State<ChatView> {
             turn.tools.isNotEmpty ||
             turn.typing);
 
+    if (msgs.isEmpty && widget.state.isHistoryLoading(chatId)) {
+      return const _HistorySkeleton();
+    }
+
     if (msgs.isEmpty && !showActivity) {
       return _ConversationEmpty(
         onPrompt: widget.state.conn == ConnState.connected
@@ -142,30 +198,154 @@ class _ChatViewState extends State<ChatView> {
       );
     }
 
-    final itemCount = msgs.length + (showActivity ? 1 : 0);
-    return Align(
-      alignment: Alignment.topCenter,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: _columnMax),
-        child: ListView.builder(
-          controller: _scroll,
-          padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
-          itemCount: itemCount,
-          itemBuilder: (context, i) {
-            if (i < msgs.length) {
-              final m = msgs[i];
-              return MessageBubble(
-                message: m,
-                botName: widget.state.status.botName,
-                animateIn: _shouldAnimate(m),
-                imageUrl: m.imagePath == null
-                    ? null
-                    : widget.state.config.mediaUrl(m.imagePath!),
-              );
-            }
-            return LiveTurn(turn: turn, botName: widget.state.status.botName);
-          },
+    final topLoader = widget.state.isLoadingOlder(chatId);
+    final itemCount = (topLoader ? 1 : 0) + msgs.length + (showActivity ? 1 : 0);
+    return Stack(
+      children: [
+        Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: _columnMax),
+            child: ListView.builder(
+              controller: _scroll,
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
+              itemCount: itemCount,
+              itemBuilder: (context, i) {
+                if (topLoader && i == 0) {
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 10),
+                    child: Center(
+                      child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                  );
+                }
+                final mi = i - (topLoader ? 1 : 0);
+                if (mi < msgs.length) {
+                  final m = msgs[mi];
+                  return MessageBubble(
+                    message: m,
+                    botName: widget.state.status.botName,
+                    animateIn: _shouldAnimate(m),
+                    // activeConfig, not config: in local auto-discover mode the
+                    // saved config lacks the bridge's real port/token, and media
+                    // fetched through it 404s or gets rejected.
+                    imageUrl: m.imagePath == null
+                        ? null
+                        : widget.state.activeConfig.mediaUrl(m.imagePath!),
+                  );
+                }
+                return LiveTurn(
+                    turn: turn, botName: widget.state.status.botName);
+              },
+            ),
+          ),
         ),
+        Positioned(
+          right: 18,
+          bottom: 12,
+          child: AnimatedSlide(
+            duration: TalonMotion.base,
+            curve: TalonMotion.emphasized,
+            offset: _awayFromBottom ? Offset.zero : const Offset(0, 0.4),
+            child: AnimatedOpacity(
+              duration: TalonMotion.fast,
+              opacity: _awayFromBottom ? 1 : 0,
+              child: IgnorePointer(
+                ignoring: !_awayFromBottom,
+                child: _JumpToLatest(onTap: _jumpToLatest),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Round "back to the newest message" button shown once the user scrolls up
+/// into history.
+class _JumpToLatest extends StatelessWidget {
+  final VoidCallback onTap;
+  const _JumpToLatest({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: TalonColors.surfaceHi,
+      shape: const CircleBorder(
+        side: BorderSide(color: TalonColors.glassStroke),
+      ),
+      elevation: 3,
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: const Padding(
+          padding: EdgeInsets.all(9),
+          child: Icon(Icons.arrow_downward_rounded,
+              size: 18, color: TalonColors.textDim),
+        ),
+      ),
+    );
+  }
+}
+
+/// Slim status strip under the header while the app is reconnecting or the
+/// bridge is unreachable, so a dead connection is visible from the chat
+/// itself (not just the sidebar pill) and recoverable in place.
+class _ConnBanner extends StatelessWidget {
+  final AppState state;
+  const _ConnBanner({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final error = state.conn == ConnState.error;
+    final color = error ? TalonColors.bad : TalonColors.warn;
+    final text = error
+        ? (state.connError ?? 'Connection lost')
+        : 'Connecting to Talon…';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      color: color.withValues(alpha: 0.10),
+      child: Row(
+        children: [
+          if (error)
+            Icon(Icons.cloud_off_rounded, size: 15, color: color)
+          else
+            SizedBox(
+              width: 13,
+              height: 13,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.8,
+                valueColor: AlwaysStoppedAnimation(color),
+              ),
+            ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12.5, color: color),
+            ),
+          ),
+          if (error)
+            TextButton(
+              onPressed: state.start,
+              style: TextButton.styleFrom(
+                foregroundColor: color,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                minimumSize: const Size(0, 30),
+                textStyle: const TextStyle(
+                    fontSize: 12.5, fontWeight: FontWeight.w700),
+              ),
+              child: const Text('Retry'),
+            ),
+        ],
       ),
     );
   }
@@ -246,6 +426,15 @@ class _ChatMenu extends StatelessWidget {
           case 'pulse':
             await state.setPulse(chat.id, !pulseOn);
             break;
+          case 'export':
+            final messenger = ScaffoldMessenger.of(context);
+            await Clipboard.setData(
+              ClipboardData(text: state.exportMarkdown(chat.id)),
+            );
+            messenger.showSnackBar(
+              const SnackBar(content: Text('Conversation copied as Markdown')),
+            );
+            break;
           case 'rename':
             await _rename(context);
             break;
@@ -258,6 +447,11 @@ class _ChatMenu extends StatelessWidget {
         const PopupMenuItem(
           value: 'reset',
           child: _MenuRow(icon: Icons.refresh, label: 'Reset session'),
+        ),
+        const PopupMenuItem(
+          value: 'export',
+          child: _MenuRow(
+              icon: Icons.ios_share_outlined, label: 'Copy as Markdown'),
         ),
         PopupMenuItem(
           value: 'pulse',
@@ -384,6 +578,53 @@ class _Chip extends StatelessWidget {
                     const TextStyle(fontSize: 12, color: TalonColors.textDim),
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shimmering placeholder rows while a chat's first history page loads, in
+/// the same silhouette as real messages so the swap doesn't jump.
+class _HistorySkeleton extends StatelessWidget {
+  const _HistorySkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.of(context).disableAnimations;
+    Widget bar(double width, {bool right = false}) {
+      final box = Align(
+        alignment: right ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          width: width,
+          height: 40,
+          margin: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: TalonColors.surfaceHi.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      );
+      if (reduceMotion) return box;
+      return box.animate(onPlay: (c) => c.repeat()).shimmer(
+            duration: 1200.ms,
+            color: Colors.white.withValues(alpha: 0.06),
+          );
+    }
+
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: _columnMax),
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 24, 20, 10),
+          children: [
+            bar(220, right: true),
+            bar(320),
+            bar(180, right: true),
+            bar(380),
+            bar(260),
           ],
         ),
       ),

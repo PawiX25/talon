@@ -140,6 +140,7 @@ class _SidebarState extends State<Sidebar> {
                 child: _ChatTile(
                   chat: chat,
                   selected: chat.id == widget.state.selectedChatId,
+                  unread: widget.state.hasUnread(chat),
                   onTap: () =>
                       (widget.onSelect ?? widget.state.selectChat)(chat.id),
                   onDelete: () => _confirmDelete(context, chat),
@@ -214,15 +215,32 @@ class _Group {
   _Group(this.label, this.chats);
 }
 
+/// Compact "how long ago" stamp for chat tiles: `now`, `12m`, `3h`, `2d`,
+/// then a short date once it's over a week old.
+String _relTime(DateTime t) {
+  final diff = DateTime.now().difference(t);
+  if (diff.inMinutes < 1) return 'now';
+  if (diff.inMinutes < 60) return '${diff.inMinutes}m';
+  if (diff.inHours < 24) return '${diff.inHours}h';
+  if (diff.inDays < 7) return '${diff.inDays}d';
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  return '${t.day} ${months[t.month - 1]}';
+}
+
 class _ChatTile extends StatefulWidget {
   final ClientChat chat;
   final bool selected;
+  final bool unread;
   final VoidCallback onTap;
   final VoidCallback onDelete;
 
   const _ChatTile({
     required this.chat,
     required this.selected,
+    required this.unread,
     required this.onTap,
     required this.onDelete,
   });
@@ -262,13 +280,14 @@ class _ChatTileState extends State<_ChatTile> {
                   : (_hover ? TalonColors.surface : Colors.transparent),
             ),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 // A slim accent bar slides in on the selected tile.
                 AnimatedContainer(
                   duration: TalonMotion.base,
                   curve: TalonMotion.emphasized,
                   width: selected ? 3 : 0,
-                  height: 15,
+                  height: 28,
                   margin: EdgeInsets.only(right: selected ? 9 : 0),
                   decoration: const BoxDecoration(
                     gradient: TalonColors.accentGradient,
@@ -276,15 +295,66 @@ class _ChatTileState extends State<_ChatTile> {
                   ),
                 ),
                 Expanded(
-                  child: Text(
-                    widget.chat.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13.5,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                      color: selected ? TalonColors.text : TalonColors.textDim,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              widget.chat.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: selected || widget.unread
+                                    ? FontWeight.w600
+                                    : FontWeight.w500,
+                                color: selected || widget.unread
+                                    ? TalonColors.text
+                                    : TalonColors.textDim,
+                              ),
+                            ),
+                          ),
+                          if (widget.chat.pulse == true)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 4),
+                              child: Icon(Icons.notifications_active_outlined,
+                                  size: 11, color: TalonColors.textFaint),
+                            ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _relTime(widget.chat.lastActiveTime),
+                            style: const TextStyle(
+                                fontSize: 10.5, color: TalonColors.textFaint),
+                          ),
+                          // Unread: activity newer than the user's last look.
+                          if (widget.unread)
+                            Container(
+                              width: 7,
+                              height: 7,
+                              margin: const EdgeInsets.only(left: 6),
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                gradient: TalonColors.accentGradient,
+                              ),
+                            ),
+                        ],
+                      ),
+                      if (widget.chat.preview.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 1),
+                          child: Text(
+                            widget.chat.preview.replaceAll('\n', ' '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 11.5,
+                                color: TalonColors.textFaint,
+                                height: 1.3),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 AnimatedOpacity(

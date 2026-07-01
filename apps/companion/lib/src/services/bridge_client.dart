@@ -108,7 +108,9 @@ class BridgeClient {
       },
       onError: (Object e) {
         AppLog.warn('bridge', 'event stream error', e);
-        _events.addError(e);
+        // dispose() closes the controller before the socket subscription is
+        // fully torn down — a late transport error must not throw into it.
+        if (!_closed) _events.addError(e);
       },
       onDone: () {
         if (!_closed) {
@@ -123,7 +125,7 @@ class BridgeClient {
   void _flush(StringBuffer buffer) {
     final raw = buffer.toString().trim();
     buffer.clear();
-    if (raw.isEmpty) return;
+    if (raw.isEmpty || _closed) return;
     try {
       final obj = _decodeObject(raw);
       _events.add(obj);
@@ -163,11 +165,30 @@ class BridgeClient {
   Future<ConfigSnapshot> setConfig(Map<String, dynamic> update) async =>
       ConfigSnapshot.fromJson(await _postJson('/config', update));
 
-  Future<List<ClientMessage>> history(String chatId) async {
-    final j = await _getJson('/history', {'chatId': chatId});
+  /// A page of history: the newest window by default, or — when [before] is
+  /// given — the window of messages strictly older than that message id.
+  Future<List<ClientMessage>> history(
+    String chatId, {
+    int? before,
+    int? limit,
+  }) async {
+    final j = await _getJson('/history', {
+      'chatId': chatId,
+      if (before != null) 'before': '$before',
+      if (limit != null) 'limit': '$limit',
+    });
     return _list(
       j['messages'],
     ).map((m) => ClientMessage.fromJson(_map(m))).toList();
+  }
+
+  /// Full-text search across chats (or one chat when [chatId] is given).
+  Future<List<SearchHit>> search(String query, {String? chatId}) async {
+    final j = await _getJson('/search', {
+      'q': query,
+      if (chatId != null) 'chatId': chatId,
+    });
+    return _list(j['results']).map((r) => SearchHit.fromJson(_map(r))).toList();
   }
 
   Future<void> send(

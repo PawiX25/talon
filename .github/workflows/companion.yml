@@ -111,11 +111,12 @@ jobs:
         if: matrix.platform == 'windows' || matrix.platform == 'linux'
         run: flutter create --platforms=${{ matrix.platform }} --project-name=talon_companion .
 
-      # The dart package stays talon_companion (valid identifier), but the
-      # user-facing native window title should read "Talon". These runner
-      # files are regenerated above, so patch the title constant here rather
-      # than committing it. Non-fatal so a template change never breaks a build.
-      - name: Set desktop window title to Talon
+      # The dart package stays talon_companion (valid identifier), but every
+      # user-facing name should read "Talon": the native window title, and on
+      # Windows the .exe's ProductName/FileDescription (shown in Task Manager /
+      # file properties). These runner files are regenerated above, so patch
+      # them here. Non-fatal so a template change never breaks a build.
+      - name: Set desktop app name to Talon
         if: matrix.platform == 'windows' || matrix.platform == 'linux'
         shell: bash
         run: |
@@ -123,7 +124,20 @@ jobs:
             sed -i 's/"talon_companion"/"Talon"/g' linux/runner/my_application.cc || true
           else
             sed -i 's/L"talon_companion"/L"Talon"/g' windows/runner/main.cpp || true
+            sed -i 's/\(VALUE "FileDescription", \)"talon_companion"/\1"Talon"/' windows/runner/Runner.rc || true
+            sed -i 's/\(VALUE "ProductName", \)"talon_companion"/\1"Talon"/' windows/runner/Runner.rc || true
           fi
+
+      # windows/ is regenerated each build, so its launcher icon must be
+      # (re)generated here from the committed source art to match the app icon
+      # shipped for android/macos. Non-fatal so an icon-tool hiccup never blocks
+      # the build.
+      - name: Generate Windows launcher icon
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          flutter pub get
+          dart run flutter_launcher_icons -f icons-windows.yaml || true
 
       - name: Build
         run: ${{ matrix.build }}

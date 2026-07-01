@@ -60,6 +60,10 @@ class ClientMessage {
   final List<List<ClientButton>> buttons;
   final List<String> reactions;
 
+  /// Relative bridge path to an attached image (e.g. `/media?id=…`), resolved
+  /// against the connection's base URL + token by the UI. Null for text rows.
+  final String? imagePath;
+
   /// Tools that ran during this assistant turn (client-only — snapshot from
   /// the live turn when the canonical message arrives, so the history pane
   /// can show what the model did).
@@ -76,6 +80,7 @@ class ClientMessage {
     required this.ts,
     this.buttons = const [],
     List<String>? reactions,
+    this.imagePath,
     List<ToolActivity>? tools,
     this.streaming = false,
   })  : reactions = reactions ?? <String>[],
@@ -96,6 +101,7 @@ class ClientMessage {
           )
           .toList(),
       reactions: _list(j['reactions']).map((e) => e.toString()).toList(),
+      imagePath: j['imagePath'] is String ? j['imagePath'] as String : null,
     );
   }
 

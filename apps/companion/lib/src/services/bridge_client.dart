@@ -170,8 +170,39 @@ class BridgeClient {
     ).map((m) => ClientMessage.fromJson(_map(m))).toList();
   }
 
-  Future<void> send(String chatId, String text) =>
-      _postJson('/send', {'chatId': chatId, 'text': text});
+  Future<void> send(
+    String chatId,
+    String text, {
+    String? imagePath,
+    String? attachmentPath,
+  }) =>
+      _postJson('/send', {
+        'chatId': chatId,
+        'text': text,
+        if (imagePath != null) 'imagePath': imagePath,
+        if (attachmentPath != null) 'attachmentPath': attachmentPath,
+      });
+
+  /// Upload image bytes to the bridge. Returns the relative render path
+  /// (`/media?id=…`) and the absolute on-disk path handed to the model.
+  Future<({String imagePath, String path})> uploadImage(
+    List<int> bytes,
+    String filename,
+    String contentType,
+  ) async {
+    final res = await _http
+        .post(
+          _u('/upload', {'filename': filename}),
+          headers: config.authHeaders({'Content-Type': contentType}),
+          body: bytes,
+        )
+        .timeout(const Duration(seconds: 30));
+    final j = _decode(res);
+    return (
+      imagePath: j['imagePath']?.toString() ?? '',
+      path: j['path']?.toString() ?? '',
+    );
+  }
 
   Future<(String active, List<ModelOption> models)> models([
     String? chatId,

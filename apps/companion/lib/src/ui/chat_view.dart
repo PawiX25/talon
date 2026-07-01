@@ -89,6 +89,7 @@ class _ChatViewState extends State<ChatView> {
                     constraints: const BoxConstraints(maxWidth: _columnMax),
                     child: Composer(
                       onSend: widget.state.sendMessage,
+                      onUpload: widget.state.uploadImage,
                       enabled: widget.state.conn == ConnState.connected,
                     ),
                   ),
@@ -128,6 +129,9 @@ class _ChatViewState extends State<ChatView> {
                 message: m,
                 botName: widget.state.status.botName,
                 animateIn: _shouldAnimate(m),
+                imageUrl: m.imagePath == null
+                    ? null
+                    : widget.state.config.mediaUrl(m.imagePath!),
               );
             }
             return LiveTurn(turn: turn, botName: widget.state.status.botName);

@@ -18,7 +18,10 @@
 import type { TalonConfig } from "../../util/config.js";
 import type { ContextManager } from "../../core/types.js";
 import type { Gateway } from "../../core/engine/gateway.js";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { log } from "../../util/log.js";
+import { dirs } from "../../util/paths.js";
 import { execute } from "../../core/engine/dispatcher.js";
 import { toolInputToRecord } from "../../core/agent-runtime/events.js";
 import {
@@ -89,6 +92,33 @@ export function createNativeFrontend(
   // unique and ascending across restarts (history rows persist their ids).
   let seq = Date.now();
   const nextId = (): number => ++seq;
+
+  // Ephemeral registry mapping a short media id → absolute file path, so the
+  // bridge can serve images the bot attaches without exposing raw paths in the
+  // URL. Lives for the process; history rows keep only a text placeholder, so
+  // images render live in-session (mirroring how the chat frontends behave).
+  const media = new Map<string, string>();
+  const registerMedia = (filePath: string): string => {
+    const id = `m${nextId().toString(36)}`;
+    media.set(id, filePath);
+    return id;
+  };
+
+  // Persist an uploaded attachment to the workspace uploads dir under a safe,
+  // unique name, and return its absolute path (handed to the model to read).
+  const saveUpload = async (
+    filename: string,
+    bytes: Buffer,
+  ): Promise<string> => {
+    await mkdir(dirs.uploads, { recursive: true });
+    const safe = basename(filename).replace(/[^\w.\-]+/g, "_") || "upload";
+    const dest = join(
+      dirs.uploads,
+      `${Date.now()}-${nextId().toString(36)}-${safe}`,
+    );
+    await writeFile(dest, bytes);
+    return dest;
+  };
 
   // ── Per-chat wire projection ─────────────────────────────────────────────
 
@@ -166,9 +196,46 @@ export function createNativeFrontend(
     return id;
   }
 
+  /** Persist + broadcast an assistant photo message (image + optional caption). */
+  function emitPhoto(
+    entry: ChatEntry,
+    filePath: string,
+    caption?: string,
+  ): number {
+    const id = nextId();
+    const ts = Date.now();
+    const text = caption?.trim() ?? "";
+    const mediaId = registerMedia(filePath);
+    const message: ClientMessage = {
+      id: String(id),
+      chatId: entry.id,
+      role: "assistant",
+      text,
+      ts,
+      imagePath: `/media?id=${encodeURIComponent(mediaId)}`,
+    };
+    // History can't carry the live image, so persist a legible placeholder.
+    pushMessage(entry.id, {
+      msgId: id,
+      senderId: BOT_SENDER_ID,
+      senderName: botName,
+      text: text ? `[photo] ${text}` : "[photo]",
+      timestamp: ts,
+    });
+    chats.touch(entry.id, text || "[photo]");
+    broadcast({ kind: "message", chatId: entry.id, message });
+    broadcastChatUpdated(entry);
+    return id;
+  }
+
   /** Persist + broadcast a user message; returns its numeric id so the turn
-   *  hands the model that same id (as `[msg_id:N]`) to react/reply to. */
-  function emitUser(entry: ChatEntry, text: string): number {
+   *  hands the model that same id (as `[msg_id:N]`) to react/reply to.
+   *  An optional imagePath renders an attached image inline. */
+  function emitUser(
+    entry: ChatEntry,
+    text: string,
+    imagePath?: string,
+  ): number {
     const id = nextId();
     const ts = Date.now();
     const message: ClientMessage = {
@@ -177,15 +244,21 @@ export function createNativeFrontend(
       role: "user",
       text,
       ts,
+      ...(imagePath ? { imagePath } : {}),
     };
+    const historyText = imagePath
+      ? text
+        ? `[photo] ${text}`
+        : "[photo]"
+      : text;
     pushMessage(entry.id, {
       msgId: id,
       senderId: USER_SENDER_ID,
       senderName: "User",
-      text,
+      text: historyText,
       timestamp: ts,
     });
-    chats.touch(entry.id, text);
+    chats.touch(entry.id, historyText);
     maybeAutoTitle(entry, text);
     broadcast({ kind: "message", chatId: entry.id, message });
     broadcastChatUpdated(entry);
@@ -213,13 +286,18 @@ export function createNativeFrontend(
     entry: ChatEntry,
     text: string,
     messageId: number,
+    attachmentPath?: string,
   ): Promise<void> {
     const start = Date.now();
+    // Point the model at an attached image so it can read the file itself.
+    const prompt = attachmentPath
+      ? `${text ? `${text}\n\n` : ""}[Attached image: ${attachmentPath}]`
+      : text;
     try {
       const result = await execute({
         chatId: entry.id,
         numericChatId: entry.numericId,
-        prompt: text,
+        prompt,
         senderName: "User",
         isGroup: false,
         // Give the model the user message's id so `[msg_id:N]` is present and
@@ -454,12 +532,17 @@ export function createNativeFrontend(
       getRecentHistory(id, 200)
         .map((m) => historyToClientMessage(m, id))
         .sort((a, b) => Number(a.id) - Number(b.id)),
-    send: (id, text) => {
+    send: (id, text, opts) => {
       const entry = chats.get(id) ?? chats.ensure(id);
-      const messageId = emitUser(entry, text);
+      const messageId = emitUser(entry, text, opts?.imagePath);
       broadcast({ kind: "turn_start", chatId: entry.id });
       broadcast({ kind: "typing", chatId: entry.id, on: true });
-      void runTurn(entry, text, messageId);
+      void runTurn(entry, text, messageId, opts?.attachmentPath);
+    },
+    upload: async (filename, _contentType, bytes) => {
+      const path = await saveUpload(filename, bytes);
+      const mediaId = registerMedia(path);
+      return { imagePath: `/media?id=${encodeURIComponent(mediaId)}`, path };
     },
     listModels,
     setModel,
@@ -487,6 +570,7 @@ export function createNativeFrontend(
       broadcast({ kind: "status", status: status() });
       return snap;
     },
+    mediaPath: (id) => media.get(id) ?? null,
   };
 
   const nativeCfg = config.native ?? { port: 19880, host: "127.0.0.1" };
@@ -534,6 +618,7 @@ export function createNativeFrontend(
           chats,
           gateway,
           emitAssistant,
+          emitPhoto,
           broadcast,
         }),
       );

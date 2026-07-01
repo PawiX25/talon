@@ -129,14 +129,23 @@ describe("native action handler", () => {
     const incrementMessages = vi.fn();
     const gateway = { incrementMessages } as unknown as Gateway;
     const emitAssistant = vi.fn().mockReturnValue(4242);
+    const emitPhoto = vi.fn().mockReturnValue(4343);
     const broadcast = vi.fn();
     const handler = createNativeActionHandler({
       chats,
       gateway,
       emitAssistant,
+      emitPhoto,
       broadcast,
     });
-    return { entry, handler, incrementMessages, emitAssistant, broadcast };
+    return {
+      entry,
+      handler,
+      incrementMessages,
+      emitAssistant,
+      emitPhoto,
+      broadcast,
+    };
   }
 
   it("delivers send_message as an assistant message and counts it", async () => {
@@ -163,6 +172,24 @@ describe("native action handler", () => {
     expect(emitAssistant).toHaveBeenCalledWith(entry, "pick", [
       [{ text: "Docs", url: "https://x", data: undefined }],
     ]);
+  });
+
+  it("delivers send_photo as a photo message with caption", async () => {
+    const { entry, handler, incrementMessages, emitPhoto } = setup();
+    const res = await handler(
+      { action: "send_photo", file_path: "/tmp/x.png", caption: "look" },
+      entry.numericId,
+    );
+    expect(emitPhoto).toHaveBeenCalledWith(entry, "/tmp/x.png", "look");
+    expect(incrementMessages).toHaveBeenCalledWith(entry.numericId);
+    expect(res).toMatchObject({ ok: true, message_id: 4343 });
+  });
+
+  it("rejects send_photo without a file_path", async () => {
+    const { entry, handler, emitPhoto } = setup();
+    const res = await handler({ action: "send_photo" }, entry.numericId);
+    expect(emitPhoto).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ ok: false });
   });
 
   it("broadcasts a reaction event", async () => {

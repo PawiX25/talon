@@ -34,7 +34,8 @@ class ConnectionConfig {
     this.launchArgs = const ['start'],
   });
 
-  bool get isLoopback => host == '127.0.0.1' || host == 'localhost' || host == '::1';
+  bool get isLoopback =>
+      host == '127.0.0.1' || host == 'localhost' || host == '::1';
 
   /// We only ever supervise a daemon for a local, loopback connection.
   bool get canManageDaemon =>
@@ -43,6 +44,16 @@ class ConnectionConfig {
   String get scheme => tls ? 'https' : 'http';
 
   String get baseUrl => '$scheme://$host:$port';
+
+  /// Resolve a relative bridge media path (e.g. `/media?id=…`) to a full URL,
+  /// appending the auth token as a query param (Image.network can't set an
+  /// Authorization header), mirroring how [eventsUrl] authorises the SSE GET.
+  String mediaUrl(String path) {
+    final t = token;
+    if (t == null || t.isEmpty) return '$baseUrl$path';
+    final sep = path.contains('?') ? '&' : '?';
+    return '$baseUrl$path${sep}token=${Uri.encodeQueryComponent(t)}';
+  }
 
   String eventsUrl() {
     final t = token;
@@ -95,8 +106,9 @@ class ConnectionConfig {
         tls: (j['tls'] ?? false) as bool,
         manageLocalDaemon: (j['manageLocalDaemon'] ?? true) as bool,
         launchCommand: (j['launchCommand'] ?? 'talon') as String,
-        launchArgs:
-            ((j['launchArgs'] as List?) ?? const ['start']).map((e) => e.toString()).toList(),
+        launchArgs: ((j['launchArgs'] as List?) ?? const ['start'])
+            .map((e) => e.toString())
+            .toList(),
       );
 
   /// Parsed result of a free-text "host" field.

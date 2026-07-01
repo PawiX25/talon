@@ -270,6 +270,10 @@ class AppState extends ChangeNotifier {
     String backend,
   ) async {
     final r = await _client?.setBackend(chatId, backend);
+    // The new backend exposes a different model catalog, so re-pull the models
+    // for this chat from the gateway. Without this the picker keeps showing the
+    // previous backend's models until the next manual refresh.
+    if (r?.ok == true) await _refreshModels(chatId);
     return r ?? (ok: false, error: 'Not connected');
   }
 

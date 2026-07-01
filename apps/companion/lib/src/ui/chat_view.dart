@@ -34,6 +34,12 @@ class _ChatViewState extends State<ChatView> {
   /// and never re-fires when a row is recycled back into view on scroll.
   final Set<String> _seen = <String>{};
 
+  /// Which chat the list is currently anchored to, and whether we still owe it
+  /// a jump-to-newest. When you open a chat it should land on the most recent
+  /// message (like any chat app), not the top of the scrollback.
+  String? _anchoredChatId;
+  bool _pendingJumpToBottom = false;
+
   @override
   void dispose() {
     _scroll.dispose();
@@ -49,10 +55,26 @@ class _ChatViewState extends State<ChatView> {
     return DateTime.now().difference(m.time).inMilliseconds < 4000;
   }
 
-  void _autoScroll() {
+  void _autoScroll(String chatId, int messageCount) {
+    // Opening (or switching to) a chat should land on the newest message. The
+    // history often loads a frame or two after the switch, so keep owing the
+    // jump until the chat actually has content, then snap to the bottom.
+    if (chatId != _anchoredChatId) {
+      _anchoredChatId = chatId;
+      _pendingJumpToBottom = true;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       final pos = _scroll.position;
+      if (_pendingJumpToBottom) {
+        _scroll.jumpTo(pos.maxScrollExtent);
+        // Only consider it settled once there's something to anchor to, so an
+        // async history load right after the switch still snaps to newest.
+        if (messageCount > 0) _pendingJumpToBottom = false;
+        return;
+      }
+      // Otherwise follow live growth only when the user is already near the
+      // bottom, so we never yank them up while they're reading scrollback.
       if (pos.maxScrollExtent - pos.pixels < 260) {
         _scroll.animateTo(
           pos.maxScrollExtent,
@@ -74,7 +96,7 @@ class _ChatViewState extends State<ChatView> {
           builder: (context, _) {
             final chat = widget.state.selectedChat;
             if (chat == null) return const _EmptyState();
-            _autoScroll();
+            _autoScroll(chat.id, widget.state.messagesFor(chat.id).length);
             return Column(
               children: [
                 _Header(

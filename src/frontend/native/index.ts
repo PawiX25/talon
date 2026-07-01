@@ -154,7 +154,9 @@ export function createNativeFrontend(
     return id;
   }
 
-  function emitUser(entry: ChatEntry, text: string): void {
+  /** Persist + broadcast a user message; returns its numeric id so the turn
+   *  hands the model that same id (as `[msg_id:N]`) to react/reply to. */
+  function emitUser(entry: ChatEntry, text: string): number {
     const id = nextId();
     const ts = Date.now();
     const message: ClientMessage = {
@@ -175,6 +177,7 @@ export function createNativeFrontend(
     maybeAutoTitle(entry, text);
     broadcast({ kind: "message", chatId: entry.id, message });
     broadcastChatUpdated(entry);
+    return id;
   }
 
   /** Transient, non-persisted notice (e.g. "session reset"). */
@@ -194,7 +197,11 @@ export function createNativeFrontend(
 
   // ── A user turn ──────────────────────────────────────────────────────────
 
-  async function runTurn(entry: ChatEntry, text: string): Promise<void> {
+  async function runTurn(
+    entry: ChatEntry,
+    text: string,
+    messageId: number,
+  ): Promise<void> {
     const start = Date.now();
     try {
       const result = await execute({
@@ -203,6 +210,9 @@ export function createNativeFrontend(
         prompt: text,
         senderName: "User",
         isGroup: false,
+        // Give the model the user message's id so `[msg_id:N]` is present and
+        // react/reply/edit target the user's message — not the bot's.
+        messageId,
         source: "message",
         onEvent: async (event) => {
           switch (event.type) {
@@ -372,10 +382,10 @@ export function createNativeFrontend(
         .sort((a, b) => Number(a.id) - Number(b.id)),
     send: (id, text) => {
       const entry = chats.get(id) ?? chats.ensure(id);
-      emitUser(entry, text);
+      const messageId = emitUser(entry, text);
       broadcast({ kind: "turn_start", chatId: entry.id });
       broadcast({ kind: "typing", chatId: entry.id, on: true });
-      void runTurn(entry, text);
+      void runTurn(entry, text, messageId);
     },
     listModels,
     setModel,

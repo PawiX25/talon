@@ -8,6 +8,9 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   previewOf,
   historyToClientMessage,
@@ -22,6 +25,11 @@ import {
   applyConfigUpdate,
   EDITABLE,
 } from "../frontend/native/settings.js";
+import {
+  removeBridgeDiscovery,
+  writeBridgeDiscovery,
+} from "../frontend/native/discovery.js";
+import { files } from "../util/paths.js";
 import type { Gateway } from "../core/engine/gateway.js";
 import type { TalonConfig } from "../util/config.js";
 
@@ -119,6 +127,46 @@ describe("NativeChats registry", () => {
     const derived = extractSessionName("[User] [msg_id:7]");
     expect(derived).toBeUndefined();
     expect(fresh.title).toBe(DEFAULT_CHAT_TITLE);
+  });
+});
+
+describe("native bridge discovery", () => {
+  it("writes and removes the loopback discovery file", async () => {
+    const original = files.nativeBridge;
+    const dir = await mkdtemp(join(tmpdir(), "talon-native-discovery-"));
+    const path = join(dir, "native-bridge.json");
+    (files as { nativeBridge: string }).nativeBridge = path;
+    try {
+      await writeBridgeDiscovery({
+        port: 19999,
+        token: "secret",
+        scheme: "http",
+        startedAt: 123,
+      });
+
+      const raw = await readFile(path, "utf8");
+      const json = JSON.parse(raw) as Record<string, unknown>;
+      expect(json).toMatchObject({
+        host: "127.0.0.1",
+        port: 19999,
+        token: "secret",
+        scheme: "http",
+        pid: process.pid,
+        protocol: 1,
+        startedAt: 123,
+      });
+      expect(typeof json.updatedAt).toBe("number");
+      if (process.platform !== "win32") {
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+      }
+
+      await removeBridgeDiscovery();
+      await expect(readFile(path, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      (files as { nativeBridge: string }).nativeBridge = original;
+    }
   });
 });
 

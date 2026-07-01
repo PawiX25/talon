@@ -28,6 +28,7 @@ void main() {
         token: 't',
         tls: true,
         manageLocalDaemon: false,
+        localAutoDiscover: true,
         launchCommand: 'talon',
         launchArgs: ['start'],
       );
@@ -37,6 +38,7 @@ void main() {
       expect(back.token, 't');
       expect(back.tls, isTrue);
       expect(back.manageLocalDaemon, isFalse);
+      expect(back.localAutoDiscover, isTrue);
     });
 
     test('tls flips scheme on base + events URLs', () {

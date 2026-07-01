@@ -28,8 +28,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
   late final TextEditingController _host;
   late final TextEditingController _port;
   late final TextEditingController _token;
-  late final TextEditingController _launch;
-  bool _manage = true;
   bool _tls = false;
 
   bool get _isDesktop {
@@ -45,12 +43,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
     super.initState();
     final c = widget.state.config;
     _remote = !c.isLoopback || !_isDesktop;
-    _manage = c.manageLocalDaemon;
     _tls = c.tls;
     _host = TextEditingController(text: c.isLoopback ? '' : c.host);
     _port = TextEditingController(text: c.port.toString());
     _token = TextEditingController(text: c.token ?? '');
-    _launch = TextEditingController(text: c.launchCommand);
   }
 
   @override
@@ -58,7 +54,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _host.dispose();
     _port.dispose();
     _token.dispose();
-    _launch.dispose();
     super.dispose();
   }
 
@@ -84,16 +79,17 @@ class _ConnectScreenState extends State<ConnectScreen> {
         if (_tls != tls) setState(() => _tls = tls);
       }
       if (host != _host.text.trim()) _host.text = host;
+    } else {
+      port = 19880;
     }
 
     final config = ConnectionConfig(
       host: host,
       port: port,
-      token: token.isEmpty ? null : token,
+      token: _remote && token.isNotEmpty ? token : null,
       tls: tls,
-      manageLocalDaemon: !_remote && _isDesktop && _manage,
-      launchCommand:
-          _launch.text.trim().isEmpty ? 'talon' : _launch.text.trim(),
+      manageLocalDaemon: false,
+      localAutoDiscover: !_remote && _isDesktop,
     );
     await widget.state.prefs.setOnboarded(true);
     await widget.state.applyConfig(config);
@@ -242,27 +238,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   List<Widget> _localFields() => [
         const _Hint(
-          'The app will connect to Talon on this machine and, if it isn\'t '
-          'running, start it for you.',
+          'Talon must be running on this computer. The app finds and connects '
+          'to it automatically — no address or token needed.',
         ),
-        const SizedBox(height: 14),
-        SwitchListTile.adaptive(
-          contentPadding: EdgeInsets.zero,
-          value: _manage,
-          onChanged: (v) => setState(() => _manage = v),
-          thumbColor: WidgetStateProperty.resolveWith((s) =>
-              s.contains(WidgetState.selected) ? TalonColors.accent : null),
-          title: const Text('Launch Talon automatically',
-              style: TextStyle(fontSize: 14)),
-          subtitle: const Text('Start the daemon if it isn\'t already running',
-              style: TextStyle(fontSize: 12, color: TalonColors.textFaint)),
-        ),
-        if (_manage) ...[
-          const SizedBox(height: 6),
-          _field(_launch, 'Launch command', hint: 'talon', mono: true),
-        ],
-        const SizedBox(height: 12),
-        _field(_port, 'Port', hint: '19880', number: true),
       ];
 
   List<Widget> _remoteFields() => [

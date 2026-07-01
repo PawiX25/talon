@@ -6,8 +6,8 @@ codebase for **Windows, macOS, Linux, and Android** (iOS/web build too).
 It speaks the **Talon Client Bridge Protocol** (HTTP + Server-Sent Events) to a
 Talon daemon running the `native` frontend:
 
-- **Desktop** — connects to a Talon on the same machine and, if one isn't
-  running, launches it for you (`TALON_FRONTEND_OVERRIDE=desktop`).
+- **Desktop** — zero-config local mode: start Talon on the same machine and
+  the app finds its bridge automatically.
 - **Mobile / remote** — connects to a Talon bridge over the network by host/IP
   + token, so your phone can drive a Talon running on your desktop or a server.
 
@@ -22,7 +22,7 @@ that speaks the protocol works.
 - Per-chat **model** + **reasoning effort** + **pulse** + **session reset**
 - **Settings sync** — read and change the daemon's own config (default model,
   display name, timezone, pulse/heartbeat/dream) and see live status
-- Restart the local daemon from the app
+- Remote bridge profiles for phones or other machines
 - Modern dark, glassy theme
 
 ## Running it
@@ -56,7 +56,17 @@ scratch, use `scripts/fix-macos-entitlements.sh` /
 `.github/workflows/companion-scaffold.yml`.
 
 On first launch, pick **This computer** (desktop) or **Remote bridge** (enter a
-host/IP + token). For remote access, run the daemon with a reachable bridge:
+host/IP + token).
+
+In **This computer** mode, Talon must already be running with the `native`
+frontend. When the native bridge starts, Talon writes
+`~/.talon/native-bridge.json` with the loopback host, actual bound port,
+optional token, scheme, process id, protocol version, and timestamps. The file
+is mode `0600` because it can contain the bridge token. The companion reads
+that file and connects to `127.0.0.1` automatically, including when Talon had to
+fall back to the next free port.
+
+For remote access, run the daemon with a reachable bridge:
 
 ```jsonc
 // ~/.talon/config.json

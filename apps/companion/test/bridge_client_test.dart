@@ -16,6 +16,7 @@ void main() {
         port: bridge.port,
         token: token,
         manageLocalDaemon: false,
+        localAutoDiscover: false,
       );
 
   group('BridgeClient.health', () {

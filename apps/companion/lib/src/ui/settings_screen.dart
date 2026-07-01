@@ -8,6 +8,9 @@ import '../theme.dart';
 import 'connect_screen.dart';
 import 'glass.dart';
 
+/// Severity for a diagnostics check row.
+enum _Health { ok, warn, bad, info }
+
 /// Talon control panel: live daemon status, the daemon's own settings (synced
 /// and editable), connection profile, and a restart action. This is the parity
 /// surface — everything Telegram's `/settings` exposes, plus the global config
@@ -234,11 +237,212 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
         const SizedBox(height: 16),
+        _diagnosticsCard(cfg),
+        const SizedBox(height: 16),
+        _aboutCard(cfg),
+        const SizedBox(height: 16),
         _connectionCard(),
         const SizedBox(height: 24),
       ],
     );
   }
+
+  // ── Diagnostics ("doctor") + About ─────────────────────────────────────────
+
+  Widget _diagnosticsCard(ConfigSnapshot? cfg) {
+    final s = widget.state;
+    final c = s.config;
+    final protoOk = s.status.protocol == kBridgeProtocolVersion;
+    final connected = s.conn == ConnState.connected;
+
+    _Health connHealth;
+    String connDetail;
+    switch (s.conn) {
+      case ConnState.connected:
+        connHealth = _Health.ok;
+        connDetail = 'Streaming events';
+      case ConnState.connecting:
+        connHealth = _Health.warn;
+        connDetail = 'Connecting…';
+      case ConnState.error:
+        connHealth = _Health.bad;
+        connDetail = 'Not connected';
+      case ConnState.idle:
+        connHealth = _Health.warn;
+        connDetail = 'Idle';
+    }
+
+    return _Section(
+      title: 'Diagnostics',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _check(connHealth, 'Connection', connDetail),
+          _check(
+            !connected ? _Health.warn : (protoOk ? _Health.ok : _Health.bad),
+            'Bridge protocol',
+            connected
+                ? (protoOk
+                    ? 'v${s.status.protocol} — matched'
+                    : 'app v$kBridgeProtocolVersion · daemon v${s.status.protocol} — mismatch')
+                : 'Unknown until connected',
+          ),
+          _check(
+            cfg == null
+                ? _Health.warn
+                : (cfg.healthy ? _Health.ok : _Health.bad),
+            'Daemon health',
+            cfg == null
+                ? 'No status yet'
+                : (cfg.healthy ? 'Reporting healthy' : 'Unhealthy'),
+          ),
+          _check(
+            _Health.info,
+            'Transport',
+            '${c.baseUrl}${c.tls ? ' · TLS' : ''}',
+          ),
+          _check(
+            _Health.info,
+            'Authentication',
+            (c.token != null && c.token!.isNotEmpty)
+                ? 'Bearer token set'
+                : (c.isLoopback ? 'None (loopback)' : 'None'),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => s.start(),
+                icon: const Icon(Icons.wifi_tethering, size: 16),
+                label: const Text('Reconnect'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: TalonColors.accent,
+                  side: BorderSide(
+                    color: TalonColors.accent.withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              TextButton.icon(
+                onPressed: _copyDiagnostics,
+                icon: const Icon(Icons.copy_all_outlined, size: 16),
+                label: const Text('Copy diagnostics'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _copyDiagnostics() async {
+    final s = widget.state;
+    final cfg = _cfg;
+    final buf = StringBuffer()
+      ..writeln('Talon companion diagnostics')
+      ..writeln('connection: ${s.conn.name}')
+      ..writeln('endpoint: ${s.config.baseUrl}')
+      ..writeln(
+          'protocol: app v$kBridgeProtocolVersion / daemon v${s.status.protocol}')
+      ..writeln('backend: ${s.status.backend}')
+      ..writeln('model: ${s.status.model}')
+      ..writeln('bot: ${s.status.botName}');
+    if (cfg != null) {
+      buf
+        ..writeln('healthy: ${cfg.healthy}')
+        ..writeln('uptimeMs: ${cfg.uptimeMs}')
+        ..writeln('sessions: ${cfg.sessions}')
+        ..writeln('messages: ${cfg.messages}')
+        ..writeln('memoryMb: ${cfg.memoryMb}');
+    }
+    buf
+      ..writeln('--- recent log ---')
+      ..writeln(AppLog.dump());
+    await Clipboard.setData(ClipboardData(text: buf.toString()));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Diagnostics copied to clipboard')),
+      );
+    }
+  }
+
+  Widget _aboutCard(ConfigSnapshot? cfg) {
+    final s = widget.state;
+    return _Section(
+      title: 'About',
+      child: Column(
+        children: [
+          _infoRow('Assistant', s.status.botName),
+          _infoRow('Backend', s.status.backend),
+          _infoRow(
+            'Default model',
+            cfg?.modelDisplay.isNotEmpty == true
+                ? cfg!.modelDisplay
+                : s.status.model,
+          ),
+          _infoRow('Bridge protocol', 'v$kBridgeProtocolVersion'),
+          _infoRow('Active chats', '${s.status.activeChats}'),
+          if (cfg != null) _infoRow('Uptime', _fmtUptime(cfg.uptimeMs)),
+          if (s.status.startedAt.isNotEmpty)
+            _infoRow('Started',
+                s.status.startedAt.replaceFirst('T', ' ').split('.').first),
+        ],
+      ),
+    );
+  }
+
+  Widget _check(_Health h, String label, String detail) {
+    final (icon, color) = switch (h) {
+      _Health.ok => (Icons.check_circle, TalonColors.ok),
+      _Health.warn => (Icons.error_outline, TalonColors.warn),
+      _Health.bad => (Icons.cancel_outlined, TalonColors.bad),
+      _Health.info => (Icons.info_outline, TalonColors.textFaint),
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 118,
+            child: Text(label,
+                style: const TextStyle(
+                    fontSize: 13.5, fontWeight: FontWeight.w600)),
+          ),
+          Expanded(
+            child: Text(
+              detail,
+              style:
+                  const TextStyle(fontSize: 12.5, color: TalonColors.textDim),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 128,
+              child: Text(label,
+                  style: const TextStyle(
+                      fontSize: 13, color: TalonColors.textDim)),
+            ),
+            Expanded(
+              child: SelectableText(
+                value.isEmpty ? '—' : value,
+                style: const TextStyle(fontSize: 13.5),
+              ),
+            ),
+          ],
+        ),
+      );
 
   Widget _statusCard(ConfigSnapshot? cfg) {
     final s = widget.state;

@@ -41,6 +41,12 @@ export type ClientMessage = {
   ts: number;
   buttons?: ClientButton[][];
   reactions?: string[];
+  /**
+   * Relative bridge path to an attached image (e.g. `/media?id=…`). The
+   * client resolves it against its own base URL + token and renders it inline.
+   * Present on photo messages the bot sends; `text` carries any caption.
+   */
+  imagePath?: string;
 };
 
 /** A conversation in the sidebar. */

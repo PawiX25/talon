@@ -18,6 +18,9 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { extname } from "node:path";
 import { log, logError, logDebug } from "../../util/log.js";
 import {
   BRIDGE_PROTOCOL_VERSION,
@@ -49,6 +52,8 @@ export type BridgeServerHandlers = {
   getConfig(): ConfigSnapshot;
   /** Change daemon settings; returns the fresh snapshot. */
   setConfig(update: Record<string, unknown>): ConfigSnapshot;
+  /** Resolve a media id to an absolute file path (or null if unknown). */
+  mediaPath(id: string): string | null;
 };
 
 const SSE_PING_MS = 25_000;
@@ -294,6 +299,11 @@ export class BridgeServer {
         return this.json(res, 200, { ok: true });
       }
 
+      if (method === "GET" && path === "/media") {
+        const id = url.searchParams.get("id") ?? "";
+        return await this.serveMedia(res, id);
+      }
+
       if (method === "GET" && path === "/config")
         return this.json(res, 200, this.handlers.getConfig());
 
@@ -306,6 +316,34 @@ export class BridgeServer {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return this.json(res, 400, { ok: false, error: msg });
+    }
+  }
+
+  /** Stream an attached image by id. Auth is already enforced by `handle`. */
+  private async serveMedia(res: ServerResponse, id: string): Promise<void> {
+    const filePath = id ? this.handlers.mediaPath(id) : null;
+    if (!filePath) {
+      return this.json(res, 404, { ok: false, error: "No such media" });
+    }
+    try {
+      const info = await stat(filePath);
+      if (!info.isFile()) {
+        return this.json(res, 404, { ok: false, error: "No such media" });
+      }
+      res.writeHead(200, {
+        ...this.corsHeaders(),
+        "Content-Type": contentTypeFor(filePath),
+        "Content-Length": String(info.size),
+        "Cache-Control": "private, max-age=3600",
+      });
+      const stream = createReadStream(filePath);
+      stream.on("error", () => {
+        if (!res.headersSent) res.writeHead(500);
+        res.end();
+      });
+      stream.pipe(res);
+    } catch {
+      return this.json(res, 404, { ok: false, error: "No such media" });
     }
   }
 
@@ -385,4 +423,25 @@ export class BridgeServer {
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+/** Minimal image content-type map for the media endpoint. */
+function contentTypeFor(filePath: string): string {
+  switch (extname(filePath).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".bmp":
+      return "image/bmp";
+    case ".svg":
+      return "image/svg+xml";
+    default:
+      return "application/octet-stream";
+  }
 }

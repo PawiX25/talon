@@ -16,7 +16,16 @@ import 'markdown.dart';
 class MessageBubble extends StatelessWidget {
   final ClientMessage message;
   final String botName;
-  const MessageBubble({super.key, required this.message, required this.botName});
+
+  /// Fully-resolved URL for an attached image (base URL + token), or null.
+  final String? imageUrl;
+
+  const MessageBubble({
+    super.key,
+    required this.message,
+    required this.botName,
+    this.imageUrl,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -117,17 +126,25 @@ class MessageBubble extends StatelessWidget {
                       padding: const EdgeInsets.only(bottom: 8),
                       child: _ToolHistory(tools: message.tools),
                     ),
-                  MarkdownBody(
-                    data: message.text.isEmpty ? '…' : message.text,
-                    selectable: true,
-                    onTapLink: (_, href, __) {
-                      if (href != null) {
-                        launchUrl(Uri.parse(href),
-                            mode: LaunchMode.externalApplication);
-                      }
-                    },
-                    styleSheet: talonMarkdownStyle(),
-                  ),
+                  if (imageUrl != null)
+                    Padding(
+                      padding:
+                          EdgeInsets.only(bottom: message.text.isEmpty ? 0 : 8),
+                      child: _InlineImage(url: imageUrl!),
+                    ),
+                  // Suppress the "…" placeholder for an image-only message.
+                  if (!(imageUrl != null && message.text.isEmpty))
+                    MarkdownBody(
+                      data: message.text.isEmpty ? '…' : message.text,
+                      selectable: true,
+                      onTapLink: (_, href, __) {
+                        if (href != null) {
+                          launchUrl(Uri.parse(href),
+                              mode: LaunchMode.externalApplication);
+                        }
+                      },
+                      styleSheet: talonMarkdownStyle(),
+                    ),
                   if (message.buttons.isNotEmpty) _buttons(),
                   if (message.reactions.isNotEmpty) _reactions(),
                   _actions(),
@@ -176,8 +193,7 @@ class MessageBubble extends StatelessWidget {
           children: [
             for (final r in message.reactions)
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
                   color: TalonColors.glassFill,
                   borderRadius: BorderRadius.circular(999),
@@ -188,6 +204,92 @@ class MessageBubble extends StatelessWidget {
           ],
         ),
       );
+}
+
+/// An inline attached image: rounded, width-capped, tap to open full-screen,
+/// with quiet loading and error states so a slow or broken fetch never breaks
+/// the row layout.
+class _InlineImage extends StatelessWidget {
+  final String url;
+  const _InlineImage({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => _openFull(context),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 320, maxHeight: 320),
+          child: Image.network(
+            url,
+            fit: BoxFit.cover,
+            loadingBuilder: (context, child, progress) {
+              if (progress == null) return child;
+              return Container(
+                width: 200,
+                height: 150,
+                alignment: Alignment.center,
+                color: TalonColors.surface,
+                child: const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              );
+            },
+            errorBuilder: (context, _, __) => Container(
+              width: 200,
+              height: 110,
+              alignment: Alignment.center,
+              color: TalonColors.surface,
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.broken_image_outlined,
+                      size: 18, color: TalonColors.textFaint),
+                  SizedBox(width: 8),
+                  Text('Image unavailable',
+                      style: TextStyle(
+                          color: TalonColors.textFaint, fontSize: 12.5)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openFull(BuildContext context) {
+    Navigator.of(context).push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        barrierColor: Colors.black.withValues(alpha: 0.9),
+        pageBuilder: (_, __, ___) => GestureDetector(
+          onTap: () => Navigator.of(context).pop(),
+          child: Stack(
+            children: [
+              Center(
+                child: InteractiveViewer(
+                  maxScale: 5,
+                  child: Image.network(url, fit: BoxFit.contain),
+                ),
+              ),
+              Positioned(
+                top: 40,
+                right: 16,
+                child: IconButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.close, color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// Collapsed summary of the tools the model ran for an assistant message.
@@ -208,8 +310,7 @@ class _ToolHistoryState extends State<_ToolHistory> {
     final tools = widget.tools;
     final failed = tools.where((t) => t.error != null).length;
     final total = Duration(
-      milliseconds:
-          tools.fold<int>(0, (a, t) => a + t.elapsed.inMilliseconds),
+      milliseconds: tools.fold<int>(0, (a, t) => a + t.elapsed.inMilliseconds),
     );
 
     return Column(
@@ -260,7 +361,8 @@ class _ToolHistoryState extends State<_ToolHistory> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      for (final t in tools) ToolChip(key: ValueKey(t.id), tool: t),
+                      for (final t in tools)
+                        ToolChip(key: ValueKey(t.id), tool: t),
                     ],
                   ),
                 )
@@ -320,8 +422,8 @@ class _CopyButtonState extends State<_CopyButton> {
             const SizedBox(width: 5),
             Text(
               _copied ? 'Copied' : 'Copy',
-              style: const TextStyle(
-                  fontSize: 11.5, color: TalonColors.textFaint),
+              style:
+                  const TextStyle(fontSize: 11.5, color: TalonColors.textFaint),
             ),
           ],
         ),

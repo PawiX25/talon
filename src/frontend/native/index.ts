@@ -79,6 +79,17 @@ export function createNativeFrontend(
   let seq = Date.now();
   const nextId = (): number => ++seq;
 
+  // Ephemeral registry mapping a short media id → absolute file path, so the
+  // bridge can serve images the bot attaches without exposing raw paths in the
+  // URL. Lives for the process; history rows keep only a text placeholder, so
+  // images render live in-session (mirroring how the chat frontends behave).
+  const media = new Map<string, string>();
+  const registerMedia = (filePath: string): string => {
+    const id = `m${nextId().toString(36)}`;
+    media.set(id, filePath);
+    return id;
+  };
+
   // ── Per-chat wire projection ─────────────────────────────────────────────
 
   function toClientChat(entry: ChatEntry): ClientChat {
@@ -132,6 +143,38 @@ export function createNativeFrontend(
       timestamp: ts,
     });
     chats.touch(entry.id, text);
+    broadcast({ kind: "message", chatId: entry.id, message });
+    broadcastChatUpdated(entry);
+    return id;
+  }
+
+  /** Persist + broadcast an assistant photo message (image + optional caption). */
+  function emitPhoto(
+    entry: ChatEntry,
+    filePath: string,
+    caption?: string,
+  ): number {
+    const id = nextId();
+    const ts = Date.now();
+    const text = caption?.trim() ?? "";
+    const mediaId = registerMedia(filePath);
+    const message: ClientMessage = {
+      id: String(id),
+      chatId: entry.id,
+      role: "assistant",
+      text,
+      ts,
+      imagePath: `/media?id=${encodeURIComponent(mediaId)}`,
+    };
+    // History can't carry the live image, so persist a legible placeholder.
+    pushMessage(entry.id, {
+      msgId: id,
+      senderId: BOT_SENDER_ID,
+      senderName: botName,
+      text: text ? `[photo] ${text}` : "[photo]",
+      timestamp: ts,
+    });
+    chats.touch(entry.id, text || "[photo]");
     broadcast({ kind: "message", chatId: entry.id, message });
     broadcastChatUpdated(entry);
     return id;
@@ -383,6 +426,7 @@ export function createNativeFrontend(
       broadcast({ kind: "status", status: status() });
       return snap;
     },
+    mediaPath: (id) => media.get(id) ?? null,
   };
 
   const nativeCfg = config.native ?? { port: 19880, host: "127.0.0.1" };
@@ -430,6 +474,7 @@ export function createNativeFrontend(
           chats,
           gateway,
           emitAssistant,
+          emitPhoto,
           broadcast,
         }),
       );

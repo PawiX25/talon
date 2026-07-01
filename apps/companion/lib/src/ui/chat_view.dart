@@ -110,8 +110,14 @@ class _ChatViewState extends State<ChatView> {
           itemCount: itemCount,
           itemBuilder: (context, i) {
             if (i < msgs.length) {
+              final m = msgs[i];
               return MessageBubble(
-                  message: msgs[i], botName: widget.state.status.botName);
+                message: m,
+                botName: widget.state.status.botName,
+                imageUrl: m.imagePath == null
+                    ? null
+                    : widget.state.config.mediaUrl(m.imagePath!),
+              );
             }
             return LiveTurn(turn: turn, botName: widget.state.status.botName);
           },
@@ -155,7 +161,8 @@ class _Header extends StatelessWidget {
               chat.title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
+              style:
+                  const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
             ),
           ),
           _Chip(
@@ -211,7 +218,8 @@ class _ChatMenu extends StatelessWidget {
         PopupMenuItem(
           value: 'pulse',
           child: _MenuRow(
-            icon: pulseOn ? Icons.notifications_active : Icons.notifications_off,
+            icon:
+                pulseOn ? Icons.notifications_active : Icons.notifications_off,
             label: pulseOn ? 'Disable pulse' : 'Enable pulse',
           ),
         ),
@@ -328,7 +336,8 @@ class _Chip extends StatelessWidget {
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, color: TalonColors.textDim),
+                style:
+                    const TextStyle(fontSize: 12, color: TalonColors.textDim),
               ),
             ),
           ],
@@ -349,7 +358,8 @@ class _EmptyState extends StatelessWidget {
         children: [
           BrandMark(size: 64),
           SizedBox(height: 18),
-          Text('Talon', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+          Text('Talon',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
           SizedBox(height: 6),
           Text('Select a chat, or start a new one.',
               style: TextStyle(color: TalonColors.textFaint)),

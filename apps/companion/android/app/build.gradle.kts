@@ -6,7 +6,11 @@ plugins {
 
 android {
     namespace = "com.example.talon_companion"
-    compileSdk = flutter.compileSdkVersion
+    // Pinned to 36 (not flutter.compileSdkVersion, currently 34) because
+    // file_picker's transitive flutter_plugin_android_lifecycle requires
+    // compiling against API 36+. compileSdk only governs which APIs are
+    // available at compile time; minSdk/targetSdk are unchanged.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

@@ -101,6 +101,37 @@ void main() {
       await _waitFor(() => !state.turnFor('c1').typing);
     });
 
+    test('reconnect re-fetches history that advanced while away', () async {
+      final bridge = await MockBridge.start();
+      addTearDown(bridge.close);
+      final state = await stateFor(configFor(bridge));
+      addTearDown(state.dispose);
+
+      await state.start();
+      await _waitFor(() => state.conn == ConnState.connected);
+      expect(state.messagesFor('c1').single.text, 'Hello');
+
+      // History advances while the client is away (a heartbeat/cron reply
+      // landed on the server, or a blip dropped live events).
+      bridge.messages['c1']!.add({
+        'id': 'm9',
+        'chatId': 'c1',
+        'role': 'assistant',
+        'text': 'while away',
+        'ts': 99,
+      });
+
+      // Reconnecting must re-pull the visible chat's history rather than keep
+      // the stale list forever (regression: a viewed chat's _loadedHistory mark
+      // used to suppress the reload).
+      await state.start();
+      await _waitFor(() => state.messagesFor('c1').any((m) => m.id == 'm9'));
+      expect(
+        state.messagesFor('c1').map((m) => m.id),
+        containsAll(<String>['m1', 'm9']),
+      );
+    });
+
     test('chat and message maintenance events update stores', () async {
       final bridge = await MockBridge.start();
       addTearDown(bridge.close);

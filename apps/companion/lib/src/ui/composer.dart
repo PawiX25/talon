@@ -1,14 +1,34 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme.dart';
 
+/// Result of an image upload: the relative render path + on-disk path.
+typedef UploadResult = ({String imagePath, String path});
+
 /// The message input. Enter sends; Shift+Enter inserts a newline. Grows with
-/// content up to a cap, then scrolls.
+/// content up to a cap, then scrolls. Supports attaching a single image, which
+/// is uploaded on send and passed through to the model.
 class Composer extends StatefulWidget {
-  final Future<void> Function(String text) onSend;
+  final Future<void> Function(
+    String text, {
+    String? imagePath,
+    String? attachmentPath,
+  }) onSend;
+  final Future<UploadResult?> Function(
+    List<int> bytes,
+    String filename,
+    String contentType,
+  ) onUpload;
   final bool enabled;
-  const Composer({super.key, required this.onSend, required this.enabled});
+
+  const Composer({
+    super.key,
+    required this.onSend,
+    required this.onUpload,
+    required this.enabled,
+  });
 
   @override
   State<Composer> createState() => _ComposerState();
@@ -18,14 +38,14 @@ class _ComposerState extends State<Composer> {
   final _controller = TextEditingController();
   final _focus = FocusNode();
   bool _canSend = false;
+  bool _uploading = false;
+  Uint8List? _pendingBytes;
+  String? _pendingName;
 
   @override
   void initState() {
     super.initState();
-    _controller.addListener(() {
-      final can = _controller.text.trim().isNotEmpty;
-      if (can != _canSend) setState(() => _canSend = can);
-    });
+    _controller.addListener(_recomputeCanSend);
   }
 
   @override
@@ -35,13 +55,72 @@ class _ComposerState extends State<Composer> {
     super.dispose();
   }
 
+  void _recomputeCanSend() {
+    final can = _controller.text.trim().isNotEmpty || _pendingBytes != null;
+    if (can != _canSend) setState(() => _canSend = can);
+  }
+
+  Future<void> _pickImage() async {
+    if (!widget.enabled || _uploading) return;
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        withData: true,
+      );
+      final file = result?.files.firstOrNull;
+      if (file?.bytes == null) return;
+      setState(() {
+        _pendingBytes = file!.bytes;
+        _pendingName = file.name;
+      });
+      _recomputeCanSend();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not pick image: $e')),
+        );
+      }
+    }
+  }
+
+  void _clearAttachment() {
+    setState(() {
+      _pendingBytes = null;
+      _pendingName = null;
+    });
+    _recomputeCanSend();
+  }
+
   Future<void> _send() async {
     final text = _controller.text.trim();
-    if (text.isEmpty || !widget.enabled) return;
+    final bytes = _pendingBytes;
+    if ((text.isEmpty && bytes == null) || !widget.enabled || _uploading) {
+      return;
+    }
+    final name = _pendingName ?? 'image.jpg';
     _controller.clear();
-    setState(() => _canSend = false);
+    setState(() {
+      _canSend = false;
+      _pendingBytes = null;
+      _pendingName = null;
+    });
     _focus.requestFocus();
-    await widget.onSend(text);
+
+    String? imagePath;
+    String? attachmentPath;
+    if (bytes != null) {
+      setState(() => _uploading = true);
+      final up = await widget.onUpload(bytes, name, _contentTypeFor(name));
+      if (mounted) setState(() => _uploading = false);
+      if (up == null) return; // failure already surfaced as a system note
+      imagePath = up.imagePath;
+      attachmentPath = up.path;
+    }
+    await widget.onSend(
+      text,
+      imagePath: imagePath,
+      attachmentPath: attachmentPath,
+    );
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -56,7 +135,7 @@ class _ComposerState extends State<Composer> {
 
   @override
   Widget build(BuildContext context) {
-    final canSend = _canSend && widget.enabled;
+    final canSend = _canSend && widget.enabled && !_uploading;
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 8, 14, 14),
       child: Container(
@@ -65,47 +144,130 @@ class _ComposerState extends State<Composer> {
           borderRadius: BorderRadius.circular(18),
           border: Border.all(color: TalonColors.glassStroke),
         ),
-        padding: const EdgeInsets.fromLTRB(16, 4, 6, 4),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
+        padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: Focus(
-                onKeyEvent: _onKey,
-                child: TextField(
-                  controller: _controller,
-                  focusNode: _focus,
-                  enabled: widget.enabled,
-                  minLines: 1,
-                  maxLines: 6,
-                  textInputAction: TextInputAction.newline,
-                  keyboardType: TextInputType.multiline,
-                  style: const TextStyle(fontSize: 14.5, height: 1.4),
-                  decoration: InputDecoration(
-                    isCollapsed: true,
-                    border: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                    hintText: widget.enabled
-                        ? 'Message Talon…'
-                        : 'Connecting…',
-                    hintStyle: const TextStyle(color: TalonColors.textFaint),
+            if (_pendingBytes != null) _attachmentPreview(),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                _AttachButton(
+                  enabled: widget.enabled && !_uploading,
+                  onTap: _pickImage,
+                ),
+                Expanded(
+                  child: Focus(
+                    onKeyEvent: _onKey,
+                    child: TextField(
+                      controller: _controller,
+                      focusNode: _focus,
+                      enabled: widget.enabled,
+                      minLines: 1,
+                      maxLines: 6,
+                      textInputAction: TextInputAction.newline,
+                      keyboardType: TextInputType.multiline,
+                      style: const TextStyle(fontSize: 14.5, height: 1.4),
+                      decoration: InputDecoration(
+                        isCollapsed: true,
+                        border: InputBorder.none,
+                        contentPadding:
+                            const EdgeInsets.symmetric(vertical: 12),
+                        hintText:
+                            widget.enabled ? 'Message Talon…' : 'Connecting…',
+                        hintStyle:
+                            const TextStyle(color: TalonColors.textFaint),
+                      ),
+                    ),
                   ),
                 ),
-              ),
+                const SizedBox(width: 6),
+                _SendButton(
+                  enabled: canSend,
+                  busy: _uploading,
+                  onTap: _send,
+                ),
+              ],
             ),
-            const SizedBox(width: 6),
-            _SendButton(enabled: canSend, onTap: _send),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _attachmentPreview() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 6, 6, 2),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.memory(
+                _pendingBytes!,
+                width: 72,
+                height: 72,
+                fit: BoxFit.cover,
+              ),
+            ),
+            Positioned(
+              top: -6,
+              right: -6,
+              child: GestureDetector(
+                onTap: _clearAttachment,
+                child: Container(
+                  decoration: const BoxDecoration(
+                    color: TalonColors.surfaceHi,
+                    shape: BoxShape.circle,
+                  ),
+                  padding: const EdgeInsets.all(2),
+                  child: const Icon(Icons.close, size: 15, color: Colors.white),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _contentTypeFor(String name) {
+    final n = name.toLowerCase();
+    if (n.endsWith('.png')) return 'image/png';
+    if (n.endsWith('.gif')) return 'image/gif';
+    if (n.endsWith('.webp')) return 'image/webp';
+    if (n.endsWith('.bmp')) return 'image/bmp';
+    return 'image/jpeg';
+  }
+}
+
+class _AttachButton extends StatelessWidget {
+  final bool enabled;
+  final VoidCallback onTap;
+  const _AttachButton({required this.enabled, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: enabled ? onTap : null,
+      icon: const Icon(Icons.add_photo_alternate_outlined, size: 22),
+      color: TalonColors.textDim,
+      tooltip: 'Attach image',
     );
   }
 }
 
 class _SendButton extends StatelessWidget {
   final bool enabled;
+  final bool busy;
   final VoidCallback onTap;
-  const _SendButton({required this.enabled, required this.onTap});
+  const _SendButton({
+    required this.enabled,
+    required this.busy,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -124,8 +286,16 @@ class _SendButton extends StatelessWidget {
               gradient: TalonColors.accentGradient,
               borderRadius: BorderRadius.circular(13),
             ),
-            child: const Icon(Icons.arrow_upward_rounded,
-                color: Colors.white, size: 20),
+            child: busy
+                ? const Padding(
+                    padding: EdgeInsets.all(11),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation(Colors.white),
+                    ),
+                  )
+                : const Icon(Icons.arrow_upward_rounded,
+                    color: Colors.white, size: 20),
           ),
         ),
       ),

@@ -215,14 +215,43 @@ class AppState extends ChangeNotifier {
     // chat_deleted event reconciles state.
   }
 
-  Future<void> sendMessage(String text) async {
+  Future<void> sendMessage(
+    String text, {
+    String? imagePath,
+    String? attachmentPath,
+  }) async {
     final chatId = selectedChatId;
     final client = _client;
-    if (chatId == null || client == null || text.trim().isEmpty) return;
+    if (chatId == null || client == null) return;
+    // Text may be empty when an image is attached.
+    if (text.trim().isEmpty && attachmentPath == null) return;
     try {
-      await client.send(chatId, text.trim());
+      await client.send(
+        chatId,
+        text.trim(),
+        imagePath: imagePath,
+        attachmentPath: attachmentPath,
+      );
     } catch (e) {
       _appendSystem(chatId, 'Failed to send: $e');
+    }
+  }
+
+  /// Upload image bytes and return the render + on-disk paths, or null on
+  /// failure (a system note is appended so the user sees what happened).
+  Future<({String imagePath, String path})?> uploadImage(
+    List<int> bytes,
+    String filename,
+    String contentType,
+  ) async {
+    final client = _client;
+    if (client == null) return null;
+    try {
+      return await client.uploadImage(bytes, filename, contentType);
+    } catch (e) {
+      final chatId = selectedChatId;
+      if (chatId != null) _appendSystem(chatId, 'Upload failed: $e');
+      return null;
     }
   }
 

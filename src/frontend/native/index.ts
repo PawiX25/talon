@@ -18,7 +18,10 @@
 import type { TalonConfig } from "../../util/config.js";
 import type { ContextManager } from "../../core/types.js";
 import type { Gateway } from "../../core/engine/gateway.js";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { log } from "../../util/log.js";
+import { dirs } from "../../util/paths.js";
 import { execute } from "../../core/engine/dispatcher.js";
 import { toolInputToRecord } from "../../core/agent-runtime/events.js";
 import { pushMessage, getRecentHistory } from "../../storage/history.js";
@@ -88,6 +91,22 @@ export function createNativeFrontend(
     const id = `m${nextId().toString(36)}`;
     media.set(id, filePath);
     return id;
+  };
+
+  // Persist an uploaded attachment to the workspace uploads dir under a safe,
+  // unique name, and return its absolute path (handed to the model to read).
+  const saveUpload = async (
+    filename: string,
+    bytes: Buffer,
+  ): Promise<string> => {
+    await mkdir(dirs.uploads, { recursive: true });
+    const safe = basename(filename).replace(/[^\w.\-]+/g, "_") || "upload";
+    const dest = join(
+      dirs.uploads,
+      `${Date.now()}-${nextId().toString(36)}-${safe}`,
+    );
+    await writeFile(dest, bytes);
+    return dest;
   };
 
   // ── Per-chat wire projection ─────────────────────────────────────────────
@@ -180,7 +199,7 @@ export function createNativeFrontend(
     return id;
   }
 
-  function emitUser(entry: ChatEntry, text: string): void {
+  function emitUser(entry: ChatEntry, text: string, imagePath?: string): void {
     const id = nextId();
     const ts = Date.now();
     const message: ClientMessage = {
@@ -189,15 +208,21 @@ export function createNativeFrontend(
       role: "user",
       text,
       ts,
+      ...(imagePath ? { imagePath } : {}),
     };
+    const historyText = imagePath
+      ? text
+        ? `[photo] ${text}`
+        : "[photo]"
+      : text;
     pushMessage(entry.id, {
       msgId: id,
       senderId: USER_SENDER_ID,
       senderName: "User",
-      text,
+      text: historyText,
       timestamp: ts,
     });
-    chats.touch(entry.id, text);
+    chats.touch(entry.id, historyText);
     broadcast({ kind: "message", chatId: entry.id, message });
     broadcastChatUpdated(entry);
   }
@@ -219,13 +244,21 @@ export function createNativeFrontend(
 
   // ── A user turn ──────────────────────────────────────────────────────────
 
-  async function runTurn(entry: ChatEntry, text: string): Promise<void> {
+  async function runTurn(
+    entry: ChatEntry,
+    text: string,
+    attachmentPath?: string,
+  ): Promise<void> {
     const start = Date.now();
+    // Point the model at an attached image so it can read the file itself.
+    const prompt = attachmentPath
+      ? `${text ? `${text}\n\n` : ""}[Attached image: ${attachmentPath}]`
+      : text;
     try {
       const result = await execute({
         chatId: entry.id,
         numericChatId: entry.numericId,
-        prompt: text,
+        prompt,
         senderName: "User",
         isGroup: false,
         source: "message",
@@ -395,12 +428,17 @@ export function createNativeFrontend(
       getRecentHistory(id, 200)
         .map((m) => historyToClientMessage(m, id))
         .sort((a, b) => Number(a.id) - Number(b.id)),
-    send: (id, text) => {
+    send: (id, text, opts) => {
       const entry = chats.get(id) ?? chats.ensure(id);
-      emitUser(entry, text);
+      emitUser(entry, text, opts?.imagePath);
       broadcast({ kind: "turn_start", chatId: entry.id });
       broadcast({ kind: "typing", chatId: entry.id, on: true });
-      void runTurn(entry, text);
+      void runTurn(entry, text, opts?.attachmentPath);
+    },
+    upload: async (filename, _contentType, bytes) => {
+      const path = await saveUpload(filename, bytes);
+      const mediaId = registerMedia(path);
+      return { imagePath: `/media?id=${encodeURIComponent(mediaId)}`, path };
     },
     listModels,
     setModel,

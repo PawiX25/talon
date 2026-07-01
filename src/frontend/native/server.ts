@@ -32,6 +32,14 @@ import {
 } from "./protocol.js";
 import type { ConfigSnapshot } from "./settings.js";
 
+/** Optional attachment references carried alongside a sent message. */
+export type SendOptions = {
+  /** Relative bridge path to render inline (e.g. `/media?id=…`). */
+  imagePath?: string;
+  /** Absolute on-disk path handed to the model so it can read the file. */
+  attachmentPath?: string;
+};
+
 /** Everything the transport needs the frontend to implement. */
 export type BridgeServerHandlers = {
   status(): BridgeStatus;
@@ -41,7 +49,13 @@ export type BridgeServerHandlers = {
   deleteChat(id: string): boolean;
   history(id: string): ClientMessage[];
   /** Fire-and-forget: streams its results back through `broadcast`. */
-  send(id: string, text: string): void;
+  send(id: string, text: string, opts?: SendOptions): void;
+  /** Persist an uploaded image and return its render path + on-disk path. */
+  upload(
+    filename: string,
+    contentType: string,
+    bytes: Buffer,
+  ): Promise<{ imagePath: string; path: string }>;
   listModels(): { active: string; models: ModelOption[] };
   setModel(id: string, model: string): void;
   setEffort(id: string, effort: string): void;
@@ -58,6 +72,7 @@ export type BridgeServerHandlers = {
 
 const SSE_PING_MS = 25_000;
 const MAX_BODY_BYTES = 256 * 1024;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const PORT_FALLBACKS = 5;
 
 export class BridgeServer {
@@ -264,13 +279,27 @@ export class BridgeServer {
         const body = await this.readJson(req);
         const id = asString(body.chatId) ?? "";
         const text = asString(body.text) ?? "";
-        if (!id || !text.trim())
+        const imagePath = asString(body.imagePath);
+        const attachmentPath = asString(body.attachmentPath);
+        // Text may be empty when an image is attached; require one or the other.
+        if (!id || (!text.trim() && !attachmentPath))
           return this.json(res, 400, {
             ok: false,
-            error: "chatId and text required",
+            error: "chatId and text (or an attachment) required",
           });
-        this.handlers.send(id, text);
+        this.handlers.send(id, text, { imagePath, attachmentPath });
         return this.json(res, 202, { ok: true });
+      }
+
+      if (method === "POST" && path === "/upload") {
+        const filename = url.searchParams.get("filename") ?? "upload";
+        const contentType =
+          req.headers["content-type"] ?? "application/octet-stream";
+        const bytes = await this.readRaw(req, MAX_UPLOAD_BYTES);
+        if (!bytes.length)
+          return this.json(res, 400, { ok: false, error: "Empty upload" });
+        const result = await this.handlers.upload(filename, contentType, bytes);
+        return this.json(res, 200, { ok: true, ...result });
       }
 
       if (method === "GET" && path === "/models")
@@ -399,6 +428,18 @@ export class BridgeServer {
   private json(res: ServerResponse, code: number, body: unknown): void {
     res.writeHead(code, this.jsonHeaders());
     res.end(JSON.stringify(body));
+  }
+
+  /** Read a raw request body (binary-safe) up to `max` bytes. */
+  private async readRaw(req: IncomingMessage, max: number): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of req) {
+      total += (chunk as Buffer).length;
+      if (total > max) throw new Error("Upload too large");
+      chunks.push(chunk as Buffer);
+    }
+    return Buffer.concat(chunks);
   }
 
   private async readJson(

@@ -76,6 +76,7 @@ class _ChatViewState extends State<ChatView> {
                     constraints: const BoxConstraints(maxWidth: _columnMax),
                     child: Composer(
                       onSend: widget.state.sendMessage,
+                      onUpload: widget.state.uploadImage,
                       enabled: widget.state.conn == ConnState.connected,
                     ),
                   ),

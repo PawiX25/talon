@@ -31,12 +31,7 @@ import {
   searchHistoryMessages,
   clearHistory,
 } from "../../storage/history.js";
-import {
-  recordTurnMeta,
-  getTurnMeta,
-  clearTurnMeta,
-  flushTurnMeta,
-} from "./turn-meta.js";
+import { recordTurnMeta, getTurnMeta, clearTurnMeta } from "./turn-meta.js";
 import {
   getChatSettings,
   setChatEffort,
@@ -845,7 +840,6 @@ export function createNativeFrontend(
     },
 
     async stop() {
-      flushTurnMeta();
       await removeBridgeDiscovery();
       await server.stop();
       await gateway.stop();

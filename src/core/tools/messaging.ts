@@ -221,7 +221,9 @@ Examples:
       delay_seconds: z
         .number()
         .optional()
-        .describe("Schedule: delay before sending (1-3600)"),
+        .describe(
+          "Schedule: delay before sending, in seconds (1-86400). Scheduled sends persist across restarts; manage with list_scheduled / cancel_scheduled.",
+        ),
       chat_id: chatIdSchema
         .optional()
         .describe(
@@ -243,9 +245,13 @@ Examples:
       switch (type) {
         case "text": {
           if (params.delay_seconds) {
+            // Buttons and reply threading survive the delay — the
+            // schedule handler replays them at fire time.
             return bridge("schedule_message", {
               text: params.text,
               delay_seconds: params.delay_seconds,
+              rows: params.buttons,
+              reply_to_message_id: params.reply_to,
               chat_id,
             });
           }

@@ -412,6 +412,10 @@ class AppState extends ChangeNotifier {
     if (chatId == null || client == null) return;
     // Text may be empty when an image is attached.
     if (text.trim().isEmpty && attachmentPath == null) return;
+    // Always hand it to the daemon: if a turn is already running for this chat
+    // the daemon parks it as the queued follow-up (synced to every client) and
+    // auto-sends it at turn end, rather than interrupting. So the app doesn't
+    // need to decide — it just sends.
     try {
       await client.send(
         chatId,
@@ -421,6 +425,23 @@ class AppState extends ChangeNotifier {
       );
     } catch (e) {
       _appendSystem(chatId, 'Failed to send: $e');
+    }
+  }
+
+  // ── Queued follow-up (server-authoritative, one slot per chat) ────────────--
+
+  /// The queued follow-up for a chat, or null when nothing is queued. Sourced
+  /// from the chat's synced state so it's identical on every device.
+  QueuedMessage? queuedFor(String chatId) => _chatById(chatId)?.queued;
+
+  /// Set / replace / clear (empty text) the chat's queued follow-up. The daemon
+  /// broadcasts the change back, so every client — including this one — updates
+  /// from the authoritative chat_updated rather than a local guess.
+  Future<void> editQueued(String chatId, String text) async {
+    try {
+      await _client?.queue(chatId, text);
+    } catch (e) {
+      AppLog.warn('app_state', 'queue edit failed', e);
     }
   }
 
@@ -570,6 +591,21 @@ class AppState extends ChangeNotifier {
       _setConn(ConnState.error, result.detail);
     }
     return result;
+  }
+
+  /// Fire a daemon-level control action over the bridge ("restart", "dream").
+  /// Unlike [restartDaemon] (which drives a locally-managed process), this asks
+  /// the *running* daemon to act on itself, so it works over a remote bridge
+  /// too — the app can restart a Talon running on another machine.
+  Future<({bool ok, String message})> daemonControl(String action) async {
+    final client = _client;
+    if (client == null) return (ok: false, message: 'Not connected');
+    try {
+      return await client.control(action);
+    } catch (e) {
+      AppLog.warn('app_state', 'control "$action" failed', e);
+      return (ok: false, message: '$e');
+    }
   }
 
   // ── Event handling ───────────────────────────────────────────────────────--
@@ -734,12 +770,14 @@ class AppState extends ChangeNotifier {
 
     final t = turnFor(chatId);
     final phase = _string(e['phase']);
+    final output = _string(e['output']);
     final existing = t.tools.where((x) => x.id == id);
     if (phase == 'result') {
       if (existing.isNotEmpty) {
         existing.first.done = true;
         existing.first.finishedAt = DateTime.now();
         existing.first.error = _string(e['error']);
+        if (output != null) existing.first.output = output;
       } else {
         // The assistant message already arrived and tools were snapshotted into
         // it before this result event landed — update the historical copy too so
@@ -750,6 +788,7 @@ class AppState extends ChangeNotifier {
               tool.done = true;
               tool.finishedAt ??= DateTime.now();
               tool.error = _string(e['error']);
+              if (output != null) tool.output = output;
             }
           }
         }

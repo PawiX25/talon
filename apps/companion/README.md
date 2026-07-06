@@ -87,10 +87,12 @@ and is mirrored in Dart under [`lib/src/models/`](lib/src/models). Endpoints:
 | GET  | `/health` | Identity + status (unauthenticated) |
 | GET  | `/events` | SSE stream of all events |
 | GET/POST | `/chats` `/chats/rename` `/chats/delete` `/chats/reset` `/chats/pulse` | Chat management |
+| POST | `/queue` | Set/replace/clear a chat's queued follow-up |
 | GET  | `/history?chatId=` | Recent messages |
 | POST | `/send` | Send a user message |
 | GET/POST | `/models` `/model` `/effort` | Model + effort |
 | GET/POST | `/config` | Read / change daemon settings |
+| POST | `/control` | Daemon-level actions (`restart`, `dream`) |
 
 All non-`/health` routes accept a bearer token (`Authorization: Bearer …`, or
 `?token=` for the SSE stream) when the daemon is configured with one.

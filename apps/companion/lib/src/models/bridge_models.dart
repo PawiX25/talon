@@ -150,6 +150,61 @@ class ClientMessage {
       };
 }
 
+/// Live context-window fill for a chat's session — mirrors the daemon's
+/// `ContextInfo`. [known] is false when the backend doesn't report a
+/// current-window figure, in which case the UI hides the readout.
+class ContextInfo {
+  final bool known;
+  final int used;
+  final int max;
+  final int pct;
+  final bool warn;
+
+  const ContextInfo({
+    required this.known,
+    required this.used,
+    required this.max,
+    required this.pct,
+    required this.warn,
+  });
+
+  factory ContextInfo.fromJson(Map<String, dynamic> j) => ContextInfo(
+        known: _bool(j['known']),
+        used: _int(j['used']),
+        max: _int(j['max']),
+        pct: _int(j['pct']),
+        warn: _bool(j['warn']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'known': known,
+        'used': used,
+        'max': max,
+        'pct': pct,
+        'warn': warn,
+      };
+}
+
+/// A follow-up parked while a turn runs — mirrors the daemon's `QueuedMessage`.
+/// Held server-side and synced to every client, so it appears (and can be
+/// edited/cancelled) on any device.
+class QueuedMessage {
+  final String text;
+  final bool hasAttachment;
+
+  const QueuedMessage({required this.text, this.hasAttachment = false});
+
+  factory QueuedMessage.fromJson(Map<String, dynamic> j) => QueuedMessage(
+        text: _string(j['text']),
+        hasAttachment: _bool(j['hasAttachment']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'text': text,
+        'hasAttachment': hasAttachment,
+      };
+}
+
 class ClientChat {
   final String id;
   String title;
@@ -160,6 +215,8 @@ class ClientChat {
   String? backend;
   String? effort;
   bool? pulse;
+  ContextInfo? context;
+  QueuedMessage? queued;
 
   ClientChat({
     required this.id,
@@ -171,6 +228,8 @@ class ClientChat {
     this.backend,
     this.effort,
     this.pulse,
+    this.context,
+    this.queued,
   });
 
   factory ClientChat.fromJson(Map<String, dynamic> j) => ClientChat(
@@ -183,6 +242,12 @@ class ClientChat {
         backend: j['backend'] is String ? j['backend'] as String : null,
         effort: j['effort'] is String ? j['effort'] as String : null,
         pulse: j['pulse'] is bool ? j['pulse'] as bool : null,
+        context: j['context'] is Map
+            ? ContextInfo.fromJson((j['context'] as Map).cast<String, dynamic>())
+            : null,
+        queued: j['queued'] is Map
+            ? QueuedMessage.fromJson((j['queued'] as Map).cast<String, dynamic>())
+            : null,
       );
 
   DateTime get lastActiveTime =>
@@ -198,6 +263,7 @@ class ClientChat {
         if (backend != null) 'backend': backend,
         if (effort != null) 'effort': effort,
         if (pulse != null) 'pulse': pulse,
+        if (context != null) 'context': context!.toJson(),
       };
 }
 
@@ -344,6 +410,9 @@ class ToolActivity {
   bool done;
   String? error;
   Map<String, dynamic> input;
+  /// Truncated string form of the tool's result, shown in the expanded view.
+  /// Arrives on the `result` phase (or re-hydrated from history).
+  String? output;
   final DateTime startedAt;
   DateTime? finishedAt;
 
@@ -353,6 +422,7 @@ class ToolActivity {
     this.done = false,
     this.error,
     Map<String, dynamic>? input,
+    this.output,
     DateTime? startedAt,
     this.finishedAt,
   })  : input = input ?? <String, dynamic>{},
@@ -369,6 +439,7 @@ class ToolActivity {
       done: true,
       error: j['error'] is String ? j['error'] as String : null,
       input: _map(j['input']),
+      output: j['output'] is String ? j['output'] as String : null,
       startedAt: started,
       finishedAt: started.add(Duration(milliseconds: duration)),
     );

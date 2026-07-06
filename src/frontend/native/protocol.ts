@@ -43,6 +43,8 @@ export type ClientToolCall = {
   error?: string;
   /** Wall-clock duration of this call, when known. */
   durationMs?: number;
+  /** Truncated string form of the tool's result, for the expanded view. */
+  output?: string;
 };
 
 /** A single rendered message in a conversation. */
@@ -76,6 +78,36 @@ export type SearchResult = {
   message: ClientMessage;
 };
 
+/**
+ * Live context-window fill for a chat's session — how much of the model's
+ * context the running conversation currently occupies. `known` is false when
+ * the backend doesn't report a current-window figure (the client then hides
+ * the readout rather than showing a fake 0%).
+ */
+export type ContextInfo = {
+  known: boolean;
+  /** Current tokens in the context window. */
+  used: number;
+  /** The model's context window size, or 0 when unknown. */
+  max: number;
+  /** used/max as a 0–100 integer (0 when not `known`). */
+  pct: number;
+  /** True once the window is ≥80% full — a hint to warn in the UI. */
+  warn: boolean;
+};
+
+/**
+ * A follow-up message queued while a turn is running. The daemon holds one
+ * per chat and auto-sends it when the current turn ends. Broadcast on the
+ * owning `ClientChat` so every connected client sees (and can edit/cancel)
+ * the same queued message.
+ */
+export type QueuedMessage = {
+  text: string;
+  /** True when an image/file is attached to the queued send. */
+  hasAttachment: boolean;
+};
+
 /** A conversation in the sidebar. */
 export type ClientChat = {
   id: string;
@@ -92,6 +124,10 @@ export type ClientChat = {
   effort?: string;
   /** Whether proactive pulse check-ins are enabled for this chat. */
   pulse?: boolean;
+  /** Live context-window fill, refreshed after each turn (when known). */
+  context?: ContextInfo;
+  /** The queued follow-up for this chat, when one is parked. */
+  queued?: QueuedMessage;
 };
 
 /** Daemon-level status shown in the client's header / status pill. */
@@ -147,6 +183,8 @@ export type BridgeEvent =
       phase: "call" | "result";
       input?: Record<string, unknown>;
       error?: string;
+      /** Truncated string form of the result, on the `result` phase. */
+      output?: string;
     }
   | { kind: "typing"; chatId: string; on: boolean }
   | {

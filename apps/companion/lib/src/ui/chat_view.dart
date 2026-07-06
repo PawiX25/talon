@@ -162,10 +162,16 @@ class _ChatViewState extends State<ChatView> {
                 Center(
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: _columnMax),
-                    child: Composer(
-                      onSend: widget.state.sendMessage,
-                      onUpload: widget.state.uploadImage,
-                      enabled: widget.state.conn == ConnState.connected,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _QueuedBar(state: widget.state, chatId: chat.id),
+                        Composer(
+                          onSend: widget.state.sendMessage,
+                          onUpload: widget.state.uploadImage,
+                          enabled: widget.state.conn == ConnState.connected,
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -389,6 +395,10 @@ class _Header extends StatelessWidget {
                   const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
             ),
           ),
+          if (chat.context?.known == true) ...[
+            _ContextChip(context: chat.context!),
+            const SizedBox(width: 6),
+          ],
           _Chip(
             icon: Icons.memory,
             label: model.isEmpty ? 'model' : model,
@@ -541,6 +551,226 @@ class _MenuRow extends StatelessWidget {
         const SizedBox(width: 10),
         Text(label, style: TextStyle(color: color, fontSize: 13.5)),
       ],
+    );
+  }
+}
+
+/// Compact context-window readout: a tiny fill ring + percentage. Turns the
+/// warn color once the window is ≥80% full. Tooltip shows the raw token
+/// figures. Purely informational — no tap action.
+class _ContextChip extends StatelessWidget {
+  final ContextInfo context;
+  const _ContextChip({required this.context});
+
+  static String _fmt(int n) {
+    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(n >= 10000 ? 0 : 1)}k';
+    return '$n';
+  }
+
+  @override
+  Widget build(BuildContext ctx) {
+    final color = context.warn ? TalonColors.warn : TalonColors.textDim;
+    final tip = context.max > 0
+        ? 'Context: ${_fmt(context.used)} / ${_fmt(context.max)} tokens (${context.pct}%)'
+        : 'Context: ${_fmt(context.used)} tokens';
+    return Tooltip(
+      message: tip,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: TalonColors.glassFill,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: context.warn ? TalonColors.warn : TalonColors.glassStroke,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 13,
+              height: 13,
+              child: CircularProgressIndicator(
+                value: (context.pct.clamp(0, 100)) / 100,
+                strokeWidth: 2.4,
+                backgroundColor: TalonColors.glassStroke,
+                valueColor: AlwaysStoppedAnimation(color),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '${context.pct}%',
+              style: TextStyle(fontSize: 12, color: color),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Sticky bar above the composer showing the single queued follow-up while a
+/// turn is running. Editable inline (pencil), sendable now (arrow), or
+/// discardable (x). It auto-sends when the running turn ends.
+class _QueuedBar extends StatefulWidget {
+  final AppState state;
+  final String chatId;
+  const _QueuedBar({required this.state, required this.chatId});
+
+  @override
+  State<_QueuedBar> createState() => _QueuedBarState();
+}
+
+class _QueuedBarState extends State<_QueuedBar> {
+  bool _editing = false;
+  final _controller = TextEditingController();
+  final _focus = FocusNode();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _startEdit(String current) {
+    _controller.text = current;
+    _controller.selection =
+        TextSelection.collapsed(offset: current.length);
+    setState(() => _editing = true);
+    _focus.requestFocus();
+  }
+
+  void _saveEdit() {
+    widget.state.editQueued(widget.chatId, _controller.text);
+    setState(() => _editing = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.state,
+      builder: (context, _) {
+        final queued = widget.state.queuedFor(widget.chatId);
+        if (queued == null) {
+          if (_editing) _editing = false;
+          return const SizedBox.shrink();
+        }
+        final hasAttachment = queued.hasAttachment;
+        return Container(
+          margin: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+          padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+          decoration: BoxDecoration(
+            color: TalonColors.accent.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: TalonColors.accent.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.schedule, size: 15, color: TalonColors.accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _editing
+                    ? TextField(
+                        controller: _controller,
+                        focusNode: _focus,
+                        autofocus: true,
+                        minLines: 1,
+                        maxLines: 4,
+                        style: const TextStyle(fontSize: 13.5),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          border: InputBorder.none,
+                          hintText: 'Edit queued message…',
+                        ),
+                        onSubmitted: (_) => _saveEdit(),
+                      )
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Queued · sends when the reply finishes',
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.3,
+                              color: TalonColors.accent,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              if (hasAttachment) ...[
+                                Icon(Icons.attach_file,
+                                    size: 13, color: TalonColors.textDim),
+                                const SizedBox(width: 4),
+                              ],
+                              Expanded(
+                                child: Text(
+                                  queued.text.isEmpty && hasAttachment
+                                      ? '(attachment)'
+                                      : queued.text,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 13.5),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+              ),
+              if (_editing)
+                _QueuedAction(
+                  icon: Icons.check,
+                  tooltip: 'Save',
+                  color: TalonColors.ok,
+                  onTap: _saveEdit,
+                )
+              else
+                _QueuedAction(
+                  icon: Icons.edit_outlined,
+                  tooltip: 'Edit',
+                  onTap: () => _startEdit(queued.text),
+                ),
+              _QueuedAction(
+                icon: Icons.close,
+                tooltip: 'Discard',
+                onTap: () {
+                  setState(() => _editing = false);
+                  widget.state.editQueued(widget.chatId, '');
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _QueuedAction extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final Color? color;
+  final VoidCallback onTap;
+  const _QueuedAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: Icon(icon, size: 18),
+      tooltip: tooltip,
+      visualDensity: VisualDensity.compact,
+      color: color ?? TalonColors.textDim,
+      onPressed: onTap,
     );
   }
 }

@@ -81,10 +81,16 @@ export type BridgeServerHandlers = {
   effortLevels(id: string): Promise<{ active: string; levels: string[] }>;
   resetChat(id: string): boolean;
   setPulse(id: string, on: boolean): void;
+  /** Set/replace/clear the chat's queued follow-up (empty text clears). */
+  queueMessage(id: string, text: string): void;
   /** Read the daemon's own (allowlisted) settings + health. */
   getConfig(): ConfigSnapshot;
   /** Change daemon settings; returns the fresh snapshot. */
   setConfig(update: Record<string, unknown>): ConfigSnapshot;
+  /** Fire a daemon-level control action (e.g. "restart", "dream"). */
+  control(action: string): Promise<{ ok: boolean; message: string }>;
+  /** Events reconstructing any in-progress turns, for a just-connected client. */
+  liveTurnEvents(): BridgeEvent[];
   /** Resolve a media id to an absolute file path (or null if unknown). */
   mediaPath(id: string): string | null;
 };
@@ -286,6 +292,15 @@ export class BridgeServer {
         return this.json(res, 200, { ok: true });
       }
 
+      if (method === "POST" && path === "/queue") {
+        const body = await this.readJson(req);
+        this.handlers.queueMessage(
+          asString(body.chatId) ?? "",
+          asString(body.text) ?? "",
+        );
+        return this.json(res, 200, { ok: true });
+      }
+
       if (method === "GET" && path === "/history") {
         const id = url.searchParams.get("chatId") ?? "";
         const before = asPositiveInt(url.searchParams.get("before"));
@@ -389,6 +404,14 @@ export class BridgeServer {
         return this.json(res, 200, this.handlers.setConfig(body));
       }
 
+      if (method === "POST" && path === "/control") {
+        const body = await this.readJson(req);
+        // Always 200: ok/message is an application result the client renders,
+        // not an HTTP-level failure (mirrors /backend).
+        const result = await this.handlers.control(asString(body.action) ?? "");
+        return this.json(res, 200, result);
+      }
+
       return this.json(res, 404, { ok: false, error: "Not found" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -441,6 +464,16 @@ export class BridgeServer {
         chats: this.handlers.listChats(),
       })}\n\n`,
     );
+    // Replay any in-progress turn so a client that connected mid-turn (or
+    // reconnected after a blip) sees the tool timeline immediately, not just
+    // the tools that fire after it joined.
+    try {
+      for (const event of this.handlers.liveTurnEvents()) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+    } catch (err) {
+      logError("native", "Failed to replay live turn to new client", err);
+    }
     this.clients.add(res);
     logDebug("native", `SSE client connected (${this.clients.size} total)`);
     res.on("close", () => {

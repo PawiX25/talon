@@ -19,9 +19,15 @@ import type { TalonConfig } from "../../util/config.js";
 import type { ContextManager } from "../../core/types.js";
 import type { Gateway } from "../../core/engine/gateway.js";
 import { mkdir, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
-import { log } from "../../util/log.js";
+import { basename, dirname, join, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { log, logError } from "../../util/log.js";
 import { dirs } from "../../util/paths.js";
+import { PKG_ROOT } from "../../cli/context.js";
+import { getSessionInfo } from "../../storage/sessions.js";
+import { buildContextDisplay } from "../shared/status-context.js";
+import { resolveActiveModelForChat } from "../../core/models/active-model.js";
+import { forceDream } from "../../core/background/dream.js";
 import { execute } from "../../core/engine/dispatcher.js";
 import { toolInputToRecord } from "../../core/agent-runtime/events.js";
 import {
@@ -72,9 +78,55 @@ import {
   type ClientChat,
   type ClientMessage,
   type ClientToolCall,
+  type ContextInfo,
   type ModelOption,
+  type QueuedMessage,
   type SearchResult,
 } from "./protocol.js";
+
+/** Best-effort JSON stringify that never throws (circular refs → String()). */
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Reduce a tool's raw result to a readable, bounded string for the app's
+ * expanded tool view. MCP results are typically
+ * `{ content: [{ type: "text", text }] }`, so pull the text parts out; fall
+ * back to pretty JSON for anything else. Truncated so a huge file read or
+ * search dump can't bloat the wire payload or the history sidecar.
+ */
+export function summarizeToolResult(result: unknown): string | undefined {
+  if (result == null) return undefined;
+  let text: string;
+  if (typeof result === "string") {
+    text = result;
+  } else {
+    const content = (result as { content?: unknown }).content;
+    if (Array.isArray(content)) {
+      const parts = content
+        .map((c) =>
+          c &&
+          typeof c === "object" &&
+          typeof (c as { text?: unknown }).text === "string"
+            ? (c as { text: string }).text
+            : "",
+        )
+        .filter((s) => s.length > 0);
+      text = parts.length > 0 ? parts.join("\n") : safeJson(result);
+    } else {
+      text = safeJson(result);
+    }
+  }
+  text = text.trim();
+  if (!text) return undefined;
+  const MAX = 4000;
+  return text.length > MAX ? `${text.slice(0, MAX)}\n… (truncated)` : text;
+}
 
 export type NativeFrontend = {
   name: "native";
@@ -127,6 +179,98 @@ export function createNativeFrontend(
     return dest;
   };
 
+  // Live context-window fill per chat, refreshed at the end of each turn.
+  // Cached (not computed inline) so the sync `toClientChat` projection stays
+  // sync — it just reads the last computed value.
+  const contextByChat = new Map<string, ContextInfo>();
+
+  // In-progress turns, keyed by chat id, so a client that (re)connects mid-turn
+  // can be replayed the turn's tool activity instead of waiting for the turn to
+  // finish. Holds the same live tool map `runTurn` mutates; cleared at turn end.
+  type LiveToolEntry = {
+    call: ClientToolCall;
+    startedAt: number;
+    done?: boolean;
+  };
+  const liveTurns = new Map<string, Map<string, LiveToolEntry>>();
+
+  /** True when a turn is currently running for a chat (used to decide queue). */
+  const isBusy = (chatId: string): boolean => liveTurns.has(chatId);
+
+  // The single queued follow-up per chat, held server-side so every connected
+  // client shares (and can edit/cancel) the same queue. Keeps the attachment
+  // paths so a queued image sends intact when the turn ends.
+  type QueuedEntry = {
+    text: string;
+    imagePath?: string;
+    attachmentPath?: string;
+  };
+  const queuedByChat = new Map<string, QueuedEntry>();
+
+  /** Project the stored queue entry to its wire shape (text + attachment flag). */
+  function toQueued(chatId: string): QueuedMessage | undefined {
+    const q = queuedByChat.get(chatId);
+    if (!q) return undefined;
+    return { text: q.text, hasAttachment: Boolean(q.attachmentPath) };
+  }
+
+  /**
+   * Set (or replace) a chat's queued follow-up and sync it to every client via
+   * chat_updated. Empty text with no attachment clears the queue.
+   */
+  function setQueued(chatId: string, next: QueuedEntry): void {
+    const entry = chats.get(chatId);
+    if (!entry) return;
+    const text = next.text.trim();
+    if (!text && !next.attachmentPath) {
+      if (!queuedByChat.delete(chatId)) return;
+    } else {
+      queuedByChat.set(chatId, {
+        text,
+        imagePath: next.imagePath,
+        attachmentPath: next.attachmentPath,
+      });
+    }
+    broadcastChatUpdated(entry);
+  }
+
+  /**
+   * Events that reconstruct every in-progress turn for a freshly-connected
+   * client: a turn_start (so the live turn renders), a typing indicator, and
+   * each tool's call — plus its result when it has already finished. Replayed
+   * right after `hello` so a reconnect mid-turn shows the full tool timeline
+   * immediately rather than only the tools that happen to fire afterwards.
+   */
+  function liveTurnEvents(): BridgeEvent[] {
+    const events: BridgeEvent[] = [];
+    for (const [chatId, tools] of liveTurns) {
+      events.push({ kind: "turn_start", chatId });
+      events.push({ kind: "typing", chatId, on: true });
+      for (const { call, done } of tools.values()) {
+        events.push({
+          kind: "tool",
+          chatId,
+          id: call.id,
+          name: call.name,
+          phase: "call",
+          ...(call.input ? { input: call.input } : {}),
+        });
+        if (done) {
+          events.push({
+            kind: "tool",
+            chatId,
+            id: call.id,
+            name: call.name,
+            phase: "result",
+            ...(call.error ? { error: call.error } : {}),
+            ...(call.output ? { output: call.output } : {}),
+          });
+        }
+      }
+    }
+    return events;
+  }
+
   // ── Per-chat wire projection ─────────────────────────────────────────────
 
   function toClientChat(entry: ChatEntry): ClientChat {
@@ -155,7 +299,67 @@ export function createNativeFrontend(
       backend,
       effort: settings.effort,
       pulse: settings.pulse,
+      context: contextByChat.get(entry.id),
+      queued: toQueued(entry.id),
     };
+  }
+
+  /**
+   * Compute the current context-window fill for a chat from its session
+   * usage, reusing the same `buildContextDisplay` the terminal/Discord
+   * `/status` line uses. When the session's usage doesn't carry a window
+   * size yet (fresh session), fall back to the resolved model's window so
+   * the readout still lands. Returns undefined when nothing is known — the
+   * clients hide the indicator rather than render a bogus 0%.
+   */
+  async function computeContext(
+    chatId: string,
+  ): Promise<ContextInfo | undefined> {
+    try {
+      const info = getSessionInfo(chatId);
+      const u = info.usage;
+      let ctxMax = u.contextWindow;
+      if (!ctxMax) {
+        try {
+          const backend = getBackendForChat(chatId);
+          const backendId = getBackendIdForChat(chatId);
+          const { ref } = await resolveActiveModelForChat(
+            chatId,
+            backend,
+            backendId,
+            config,
+          );
+          if (ref?.contextWindow) ctxMax = ref.contextWindow;
+        } catch {
+          /* backend pool not ready — leave max unknown */
+        }
+      }
+      const ctx = buildContextDisplay({
+        contextTokens: u.contextTokens,
+        lastPromptTokens: u.lastPromptTokens,
+        contextWindow: ctxMax,
+      });
+      if (!ctx.known && ctx.max === 0) return undefined;
+      return {
+        known: ctx.known,
+        used: ctx.used,
+        max: ctx.max,
+        pct: ctx.pct,
+        warn: ctx.warn,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Recompute a chat's context fill and, if it changed, push it to clients. */
+  async function refreshContext(entry: ChatEntry): Promise<void> {
+    const next = await computeContext(entry.id);
+    if (!next) return;
+    const prev = contextByChat.get(entry.id);
+    if (prev && prev.used === next.used && prev.max === next.max) return;
+    contextByChat.set(entry.id, next);
+    broadcastChatUpdated(entry);
   }
 
   const broadcast = (event: BridgeEvent): void => server.broadcast(event);
@@ -319,11 +523,11 @@ export function createNativeFrontend(
   ): Promise<void> {
     const start = Date.now();
     // Tool calls observed during this turn, in call order — recorded into the
-    // turn-meta sidecar at turn_end so history can replay the timeline.
-    const turnTools = new Map<
-      string,
-      { call: ClientToolCall; startedAt: number; done?: boolean }
-    >();
+    // turn-meta sidecar at turn_end so history can replay the timeline. Also
+    // registered in `liveTurns` so a client connecting mid-turn can be replayed
+    // the activity so far (cleared in the `finally`).
+    const turnTools = new Map<string, LiveToolEntry>();
+    liveTurns.set(entry.id, turnTools);
     // Safety net: any tool the backend announced but never resolved
     // (text-mode backends don't emit tool_result; crashes can eat one)
     // gets a synthetic result at turn end — a spinner the app opened
@@ -387,11 +591,13 @@ export function createNativeFrontend(
               break;
             }
             case "tool_result": {
+              const output = summarizeToolResult(event.result);
               const live = turnTools.get(event.id);
               if (live) {
                 live.done = true;
                 live.call.durationMs = Date.now() - live.startedAt;
                 if (event.error) live.call.error = event.error;
+                if (output) live.call.output = output;
               }
               broadcast({
                 kind: "tool",
@@ -400,6 +606,7 @@ export function createNativeFrontend(
                 name: event.name,
                 phase: "result",
                 ...(event.error ? { error: event.error } : {}),
+                ...(output ? { output } : {}),
               });
               break;
             }
@@ -453,6 +660,11 @@ export function createNativeFrontend(
         durationMs: result.durationMs,
         usage: { input: result.inputTokens, output: result.outputTokens },
       });
+
+      // Refresh the live context-window readout now the turn's usage has
+      // settled, and push it to clients via chat_updated. Best-effort — a
+      // failure here must never surface as a turn error.
+      void refreshContext(entry).catch(() => {});
     } catch (err) {
       flushOpenTools();
       broadcast({ kind: "typing", chatId: entry.id, on: false });
@@ -467,7 +679,42 @@ export function createNativeFrontend(
         delivered: 0,
         durationMs: Date.now() - start,
       });
+    } finally {
+      // The turn is over (delivered or errored) — stop replaying it to new
+      // clients. Any late tool spinner has already been flushed above.
+      liveTurns.delete(entry.id);
+      // Flush a queued follow-up as a fresh turn: "once it's done it will
+      // send". Deferred so we don't re-enter runTurn inside its own finally.
+      const queued = queuedByChat.get(entry.id);
+      if (queued) {
+        queuedByChat.delete(entry.id);
+        broadcastChatUpdated(entry);
+        setImmediate(() =>
+          startTurn(entry, queued.text, {
+            imagePath: queued.imagePath,
+            attachmentPath: queued.attachmentPath,
+          }),
+        );
+      }
     }
+  }
+
+  /** Emit the user message, open the turn, and drive it. Shared by the /send
+   *  handler and the queued-follow-up flush. */
+  function startTurn(
+    entry: ChatEntry,
+    text: string,
+    opts?: { imagePath?: string; attachmentPath?: string },
+  ): void {
+    const messageId = emitUser(
+      entry,
+      text,
+      opts?.imagePath,
+      opts?.attachmentPath,
+    );
+    broadcast({ kind: "turn_start", chatId: entry.id });
+    broadcast({ kind: "typing", chatId: entry.id, on: true });
+    void runTurn(entry, text, messageId, opts?.attachmentPath);
   }
 
   // ── Status + model helpers ───────────────────────────────────────────────
@@ -625,6 +872,8 @@ export function createNativeFrontend(
     resetSession(chatId);
     clearHistory(chatId);
     clearTurnMeta(chatId);
+    contextByChat.delete(chatId);
+    queuedByChat.delete(chatId);
     resetPulseCheckpoint(chatId);
     emitSystem(entry, `Switched to ${target} — starting a fresh conversation.`);
     broadcastChatUpdated(entry);
@@ -661,6 +910,74 @@ export function createNativeFrontend(
     }
   }
 
+  // ── Daemon control (restart / dream) ─────────────────────────────────────
+
+  /**
+   * Restart the daemon by spawning a detached `talon restart` — the same
+   * command a human runs. It must be an independent, detached process: the
+   * restart stops *this* process, so doing it in-process would kill us before
+   * the successor is spawned. The child outlives us, tears the daemon down,
+   * and brings a fresh one up. Mirrors `core/daemon/control.ts`'s own
+   * source-vs-compiled-binary spawn recipe.
+   */
+  function spawnDaemonRestart(): void {
+    const isBunBinary =
+      (process.argv[1] ?? "").includes("~BUN") ||
+      (process.argv[1] ?? "").includes("$bunfs");
+    const cmd = process.execPath;
+    const args = isBunBinary
+      ? ["restart"]
+      : [
+          resolve(PKG_ROOT, "node_modules", "tsx", "dist", "cli.mjs"),
+          resolve(PKG_ROOT, "src", "cli.ts"),
+          "restart",
+        ];
+    const cwd = isBunBinary ? dirname(process.execPath) : PKG_ROOT;
+    const child = spawn(cmd, args, {
+      cwd,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env },
+      windowsHide: true,
+    });
+    child.unref();
+  }
+
+  /**
+   * Daemon-level control actions the app fires from Settings. Kept minimal and
+   * explicit — each maps to a well-understood operation the CLI already
+   * exposes, so there's no new privileged surface beyond "what a local admin
+   * could already do".
+   */
+  async function control(
+    action: string,
+  ): Promise<{ ok: boolean; message: string }> {
+    switch (action) {
+      case "restart":
+        spawnDaemonRestart();
+        return {
+          ok: true,
+          message: "Restarting Talon — back online in a few seconds.",
+        };
+      case "dream":
+        // Fire-and-forget: a dream run can take a while; the app just needs
+        // to know it started. forceDream throws if one is already running.
+        try {
+          void forceDream().catch((err) =>
+            logError("native", "Manual dream run failed", err),
+          );
+          return { ok: true, message: "Dream started — consolidating memory." };
+        } catch (err) {
+          return {
+            ok: false,
+            message: err instanceof Error ? err.message : String(err),
+          };
+        }
+      default:
+        return { ok: false, message: `Unknown control action: ${action}` };
+    }
+  }
+
   // ── Bridge server wiring ─────────────────────────────────────────────────
 
   const handlers: BridgeServerHandlers = {
@@ -683,6 +1000,8 @@ export function createNativeFrontend(
       const ok = chats.remove(id);
       if (ok) {
         clearTurnMeta(id);
+        contextByChat.delete(id);
+        queuedByChat.delete(id);
         broadcast({ kind: "chat_deleted", chatId: id });
       }
       return ok;
@@ -737,15 +1056,25 @@ export function createNativeFrontend(
     },
     send: (id, text, opts) => {
       const entry = chats.get(id) ?? chats.ensure(id);
-      const messageId = emitUser(
-        entry,
-        text,
-        opts?.imagePath,
-        opts?.attachmentPath,
-      );
-      broadcast({ kind: "turn_start", chatId: entry.id });
-      broadcast({ kind: "typing", chatId: entry.id, on: true });
-      void runTurn(entry, text, messageId, opts?.attachmentPath);
+      // A turn is already running for this chat — don't interrupt it. Park the
+      // message as the single queued follow-up (synced to every client); it
+      // auto-sends when the running turn ends. `isBusy` reads `liveTurns`,
+      // which `runTurn` sets synchronously, so even a rapid second /send from
+      // any client is caught here rather than starting a concurrent turn.
+      if (isBusy(entry.id)) {
+        setQueued(entry.id, {
+          text,
+          imagePath: opts?.imagePath,
+          attachmentPath: opts?.attachmentPath,
+        });
+        return;
+      }
+      startTurn(entry, text, opts);
+    },
+    queueMessage: (id, text) => {
+      // Edit/replace the queued follow-up (text-only). Empty clears it.
+      const entry = chats.get(id);
+      if (entry) setQueued(entry.id, { text });
     },
     upload: async (filename, _contentType, bytes) => {
       const path = await saveUpload(filename, bytes);
@@ -768,6 +1097,8 @@ export function createNativeFrontend(
       resetSession(id);
       clearHistory(id);
       clearTurnMeta(id);
+      contextByChat.delete(id);
+      queuedByChat.delete(id);
       resetPulseCheckpoint(id);
       let backend = null;
       try {
@@ -793,6 +1124,8 @@ export function createNativeFrontend(
       broadcast({ kind: "status", status: status() });
       return snap;
     },
+    control,
+    liveTurnEvents,
     mediaPath: (id) => media.get(id) ?? null,
   };
 

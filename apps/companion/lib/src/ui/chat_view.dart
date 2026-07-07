@@ -170,6 +170,8 @@ class _ChatViewState extends State<ChatView> {
                           onSend: widget.state.sendMessage,
                           onUpload: widget.state.uploadImage,
                           enabled: widget.state.conn == ConnState.connected,
+                          running: widget.state.isTurnRunning(chat.id),
+                          onStop: () => widget.state.interruptTurn(chat.id),
                         ),
                       ],
                     ),
@@ -190,7 +192,8 @@ class _ChatViewState extends State<ChatView> {
         (turn.draft.isNotEmpty ||
             turn.reasoning.isNotEmpty ||
             turn.tools.isNotEmpty ||
-            turn.typing);
+            turn.typing ||
+            turn.continuing);
 
     if (msgs.isEmpty && widget.state.isHistoryLoading(chatId)) {
       return const _HistorySkeleton();
@@ -379,39 +382,61 @@ class _Header extends StatelessWidget {
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: TalonColors.glassStroke)),
       ),
-      child: Row(
-        children: [
-          if (showBack)
-            IconButton(
-              onPressed: onBack,
-              icon: const Icon(Icons.arrow_back_ios_new, size: 18),
-            ),
-          Expanded(
-            child: Text(
-              chat.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style:
-                  const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700),
-            ),
-          ),
-          if (chat.context?.known == true) ...[
-            _ContextChip(context: chat.context!),
-            const SizedBox(width: 6),
-          ],
-          _Chip(
-            icon: Icons.memory,
-            label: model.isEmpty ? 'model' : model,
-            onTap: () => openModelSheet(context, state, chat),
-          ),
-          const SizedBox(width: 6),
-          _Chip(
-            icon: Icons.tune,
-            label: effort,
-            onTap: () => openModelSheet(context, state, chat),
-          ),
-          _ChatMenu(state: state, chat: chat),
-        ],
+      // Auto-detect available width instead of hard-coding a platform check:
+      // a desktop window with the sidebar open gives the chat pane less room
+      // than the same window fullscreen, and the phone is always narrow. Below
+      // the breakpoint we fold model + reasoning-effort into a single pill so
+      // the bar stops squishing on mobile; the context% pill always stays (the
+      // ring readout is worth its width). Above it, keep them separate.
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 560;
+          final modelLabel = model.isEmpty ? 'model' : model;
+          return Row(
+            children: [
+              if (showBack)
+                IconButton(
+                  onPressed: onBack,
+                  icon: const Icon(Icons.arrow_back_ios_new, size: 18),
+                ),
+              Expanded(
+                child: Text(
+                  chat.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 15.5, fontWeight: FontWeight.w700),
+                ),
+              ),
+              if (chat.context?.known == true) ...[
+                _ContextChip(context: chat.context!),
+                const SizedBox(width: 6),
+              ],
+              if (compact)
+                // One pill: "model · effort". Taps into the same model sheet,
+                // which carries both controls anyway.
+                _Chip(
+                  icon: Icons.memory,
+                  label: '$modelLabel · $effort',
+                  onTap: () => openModelSheet(context, state, chat),
+                )
+              else ...[
+                _Chip(
+                  icon: Icons.memory,
+                  label: modelLabel,
+                  onTap: () => openModelSheet(context, state, chat),
+                ),
+                const SizedBox(width: 6),
+                _Chip(
+                  icon: Icons.tune,
+                  label: effort,
+                  onTap: () => openModelSheet(context, state, chat),
+                ),
+              ],
+              _ChatMenu(state: state, chat: chat),
+            ],
+          );
+        },
       ),
     );
   }

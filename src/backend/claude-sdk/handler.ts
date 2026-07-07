@@ -35,6 +35,7 @@ import { makeBareModelRef } from "../../core/agent-runtime/model-ref.js";
 import { applyRetryDecisionStream } from "../shared/handle-retry.js";
 import { getConfig } from "./state.js";
 import { buildSdkOptions, getActiveFrontends } from "./options.js";
+import { waitForMcpServersReady } from "./mcp-ready.js";
 import { frontendsForChat } from "../shared/frontends.js";
 import {
   createStreamState,
@@ -100,6 +101,30 @@ const SDK_POST_RESULT_GRACE_MS = envMs(
 const activeQueries = new Map<string, Query>();
 
 /** Get the active Query for a chat, if one is in flight. */
+/**
+ * Best-effort graceful interrupt of a chat's in-flight turn. Uses the SDK's
+ * native `Query.interrupt()`, which stops the agent loop and closes the stream
+ * with a `result` (subtype `interrupt`) — so the turn ends as a normal
+ * completion (turn_end + usage), NOT an error, and never trips the
+ * model-fallback retry path. No-op (returns false) when no turn is running.
+ */
+export async function interruptChatTurn(chatId: string): Promise<boolean> {
+  const qi = activeQueries.get(chatId);
+  if (!qi) return false;
+  try {
+    await qi.interrupt();
+    log("agent", `[${chatId}] turn interrupted by user`);
+    incrementCounter("sdk.turn_interrupted");
+    return true;
+  } catch (err) {
+    logWarn(
+      "agent",
+      `[${chatId}] interrupt failed: ${err instanceof Error ? err.message : err}`,
+    );
+    return false;
+  }
+}
+
 export function getActiveQuery(chatId: string): Query | undefined {
   return activeQueries.get(chatId);
 }
@@ -189,6 +214,23 @@ export async function* runChatTurn(
 
   const qi = query({ prompt, options });
   activeQueries.set(chatId, qi);
+
+  // Cold-start delivery-tool race. The Claude SDK spawns a fresh subprocess
+  // per turn, and each reconnects to the hub's `${frontend}-tools` server.
+  // `alwaysLoad` is meant to block startup until that server connects, but on
+  // the FIRST turn of a freshly-opened chat the hub binding is created cold and
+  // can still be `pending` when the model builds its turn-1 tool list — so
+  // `end_turn`/`send` are absent and the reply silently fails (or the model
+  // burns a `tool_search` round-trip to recover it). After a close+reconnect
+  // the hub binding is warm, connects instantly, and the tools are present —
+  // which is exactly why the bug "heals" on reconnect. Explicitly wait (bounded,
+  // non-throwing) for the delivery server to leave `pending` before consuming
+  // the stream. This mirrors the proven `refreshTools` gate and returns
+  // immediately on warm turns, so it adds no steady-state latency.
+  if (frontend) {
+    await waitForMcpServersReady(qi, [`${frontend}-tools`], 5_000, 100);
+  }
+
   const state = createStreamState();
   // tool_use id → tool name for calls we've announced this turn; lets
   // the tool_result emission name the tool without re-parsing blocks.

@@ -4,11 +4,11 @@
  * resolution / provider shapes the `Backend.models` slot exposes
  * to the dispatcher and frontend pickers.
  *
- * Kilo is the only backend with this thin adapter layer; opencode
- * talks to the dispatcher through the same internal types directly.
- * So these tests have no opencode equivalent — they exist because
- * this glue is the easiest place for a model-shape regression to
- * slip past tsc.
+ * The adapter is the shared `createRemoteModelProvider` factory
+ * (backend/remote-server/model-catalog/provider.ts) bound to Kilo's
+ * catalog module — OpenCode binds the same factory, so these tests
+ * cover both. They exist because this glue is the easiest place for
+ * a model-shape regression to slip past tsc.
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -286,20 +286,20 @@ describe("kilo/model-provider — getProviders", () => {
 });
 
 describe("kilo/model-provider — getProviderModels", () => {
-  it("returns the right slice for page 0 and a page size that fits", async () => {
-    const { models, total } = await getProviderModels("kilo", 0, 8);
+  it("returns the right slice for page 1 and a page size that fits", async () => {
+    const { models, total } = await getProviderModels("kilo", 1, 8);
     expect(total).toBe(2);
     expect(models).toHaveLength(2);
     expect(models.map((m) => m.id)).toEqual(["big-pickle", "small-cucumber"]);
   });
 
   it("paginates correctly when pageSize is smaller than total", async () => {
-    const page0 = await getProviderModels("kilo", 0, 1);
     const page1 = await getProviderModels("kilo", 1, 1);
-    expect(page0.models.map((m) => m.id)).toEqual(["big-pickle"]);
-    expect(page1.models.map((m) => m.id)).toEqual(["small-cucumber"]);
-    expect(page0.total).toBe(2);
+    const page2 = await getProviderModels("kilo", 2, 1);
+    expect(page1.models.map((m) => m.id)).toEqual(["big-pickle"]);
+    expect(page2.models.map((m) => m.id)).toEqual(["small-cucumber"]);
     expect(page1.total).toBe(2);
+    expect(page2.total).toBe(2);
   });
 
   it("returns an empty page past the end without throwing", async () => {
@@ -309,7 +309,7 @@ describe("kilo/model-provider — getProviderModels", () => {
   });
 
   it("returns no models for an unknown provider", async () => {
-    const { models, total } = await getProviderModels("nobody", 0, 8);
+    const { models, total } = await getProviderModels("nobody", 1, 8);
     expect(models).toEqual([]);
     expect(total).toBe(0);
   });

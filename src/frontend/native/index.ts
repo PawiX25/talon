@@ -66,6 +66,7 @@ import { NativeChats, DEFAULT_CHAT_TITLE, type ChatEntry } from "./chats.js";
 import { extractSessionName } from "../../backend/shared/session-name.js";
 import { BridgeServer, type BridgeServerHandlers } from "./server.js";
 import { createNativeActionHandler } from "./actions.js";
+import { getMeshService } from "../../core/mesh/index.js";
 import { removeBridgeDiscovery, writeBridgeDiscovery } from "./discovery.js";
 import { readLogEntries } from "./logs.js";
 import {
@@ -148,6 +149,13 @@ export function createNativeFrontend(
   const startedAt = new Date().toISOString();
   const botName = config.botDisplayName || "Talon";
   const chats = new NativeChats();
+  // Daemon-wide mesh service (core/mesh). This frontend is its transport:
+  // companions register/report/answer through the bridge routes below, and
+  // the SSE transport (wired in init) pushes locate requests and device
+  // commands out. The model's mesh tools are served by the shared gateway
+  // actions, so they work from every frontend.
+  const mesh = getMeshService();
+  let unregisterMeshTransport: (() => void) | null = null;
 
   // Monotonic message-id minter. Seeded from the wall clock so ids stay
   // unique and ascending across restarts (history rows persist their ids).
@@ -732,6 +740,7 @@ export function createNativeFrontend(
     return {
       app: "talon-bridge",
       protocol: BRIDGE_PROTOCOL_VERSION,
+      capabilities: ["mesh", "mesh-commands"],
       botName,
       backend: config.backend,
       model: resolveModel(config.model)?.displayName ?? config.model,
@@ -1161,6 +1170,12 @@ export function createNativeFrontend(
       readLogEntries(files.log, { limit: lines, minLevel, component }),
     liveTurnEvents,
     mediaPath: (id) => media.get(id) ?? null,
+    // Mesh routes are thin transport shims over the shared core service —
+    // storeLocation wakes any pending fresh-fix waiters inside the service.
+    registerDevice: (body) => mesh.register(body),
+    storeLocation: (body) => mesh.storeLocation(body),
+    listDevices: () => mesh.list(),
+    completeCommand: (body) => mesh.completeCommand(body),
   };
 
   const nativeCfg = config.native ?? { port: 19880, host: "127.0.0.1" };
@@ -1202,6 +1217,24 @@ export function createNativeFrontend(
     getBridgePort: () => gateway.getPort(),
 
     async init() {
+      await mesh.load();
+      // Plug this bridge in as the mesh's transport: locates and device
+      // commands (from ANY frontend's mesh tool calls) fan out to every
+      // connected companion client as SSE events; each client filters by
+      // its own device id.
+      unregisterMeshTransport = mesh.registerTransport({
+        locate: (deviceId) => broadcast({ kind: "locate", deviceId }),
+        command: (command) =>
+          broadcast({
+            kind: "device_command",
+            id: command.id,
+            deviceId: command.deviceId,
+            name: command.name,
+            params: command.params,
+          }),
+      });
+      // Mesh tool actions (list_devices / get_device_location) are shared
+      // gateway actions now — no native-only cases here.
       gateway.registerFrontendHandler(
         "native",
         createNativeActionHandler({
@@ -1231,6 +1264,8 @@ export function createNativeFrontend(
     },
 
     async stop() {
+      unregisterMeshTransport?.();
+      unregisterMeshTransport = null;
       await removeBridgeDiscovery();
       await server.stop();
       await gateway.stop();

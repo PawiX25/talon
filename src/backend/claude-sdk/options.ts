@@ -30,6 +30,23 @@ import { log, logError } from "../../util/log.js";
 import { getConfig, getBridgePort } from "./state.js";
 import { ALLOWED_TOOLS_CHAT, EFFORT_MAP } from "./constants.js";
 
+/**
+ * Built-in SDK tools that Talon's native tool set replaces when
+ * `config.nativeTools` is on. The shell/filesystem built-ins map 1:1 to
+ * bash/read/write/edit/glob/search; `Agent` (sub-agent dispatch) is dropped
+ * alongside them per the owner's preference for the native surface.
+ */
+const NATIVE_REPLACED_BUILTINS = new Set<string>([
+  "Read",
+  "Write",
+  "Edit",
+  "NotebookEdit",
+  "Bash",
+  "Glob",
+  "Grep",
+  "Agent",
+]);
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type BuildSdkOptionsResult = {
@@ -61,7 +78,18 @@ export type HubMcpEntry = {
   type: "http";
   url: string;
   alwaysLoad?: boolean;
+  /** Per-server tool-call timeout in ms (overrides MCP_TOOL_TIMEOUT). */
+  timeout?: number;
 };
+
+/**
+ * Tool-call timeout for the Talon frontend tool servers. Must sit ABOVE the
+ * bridge's largest per-action budget (1h for uncapped device file transfers)
+ * so the layer that times out is the bridge — whose error names the action,
+ * the budget, and warns the operation may still be running — rather than the
+ * SDK's generic MCP timeout, which tells the model nothing actionable.
+ */
+const FRONTEND_TOOL_CALL_TIMEOUT_MS = 3_900_000; // 65 min
 
 /**
  * Build the MCP servers map for a chat query.
@@ -102,6 +130,8 @@ export function buildMcpServers(chatId: string): Record<string, HubMcpEntry> {
       // lever here. Cost: ~50 frontend tool schemas loaded every turn (~10k
       // tokens, cached, negligible on the 1M-context models Talon runs).
       alwaysLoad: true,
+      // Outlast the bridge's 1h transfer budget — see the constant's doc.
+      timeout: FRONTEND_TOOL_CALL_TIMEOUT_MS,
     };
   }
 
@@ -388,7 +418,17 @@ export function buildSdkOptions(
     // WebFetch, Monitor, PushNotification, RemoteTrigger, Plan/Worktree/Todo
     // helpers, AskUserQuestion, ScheduleWakeup) is unavailable to the model.
     // MCP tools are governed independently via `mcpServers` below.
-    tools: [...ALLOWED_TOOLS_CHAT],
+    //
+    // When `config.nativeTools` is on, the SDK's built-in shell/filesystem
+    // tools are dropped in favour of Talon's own native tools (which also
+    // teleport onto companion devices), and Agent (sub-agent dispatch) is
+    // removed too — the owner prefers the native surface without nested
+    // agents. Flip the flag back off to restore the built-ins instantly.
+    tools: config.nativeTools
+      ? ALLOWED_TOOLS_CHAT.filter(
+          (t) => !NATIVE_REPLACED_BUILTINS.has(t as string),
+        )
+      : [...ALLOWED_TOOLS_CHAT],
     ...thinkingConfig,
     mcpServers: {
       ...buildMcpServers(chatId),

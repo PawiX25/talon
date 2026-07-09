@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io' show Directory, File, Platform;
 
 import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -12,6 +12,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:uuid/uuid.dart';
 
 import 'bridge_client.dart';
+import 'device_exec.dart';
 import 'log.dart';
 import 'prefs.dart';
 
@@ -71,13 +72,32 @@ class _MeshForegroundTaskHandler extends TaskHandler {
 }
 
 class MeshService {
-  /// Commands this build can execute, advertised at registration so the
+  /// Base commands every build can execute, advertised at registration so the
   /// daemon can refuse unsupported commands with a clear message instead of
-  /// timing out.
+  /// timing out. Exec/filesystem commands are appended when device control is
+  /// enabled (see [capabilitiesFor]).
   static const List<String> capabilities = ['locate', 'ring', 'status'];
+
+  /// Streamed file-transfer commands: ONE command round trip arranges the
+  /// transfer, then the file body moves as a single raw HTTP request via
+  /// BridgeClient.uploadFile/downloadFile — replacing the chunked command
+  /// channel (a full mesh round trip per chunk) for file bodies.
+  static const List<String> transferCapabilities = [
+    'upload_file',
+    'download_file',
+  ];
+
+  /// Advertised capabilities for the current prefs — adds the exec/fs surface
+  /// (DeviceExec) and streamed transfers when device control is enabled.
+  static List<String> capabilitiesFor(Prefs prefs) => [
+        ...capabilities,
+        if (prefs.meshDeviceControl) ...DeviceExec.capabilities,
+        if (prefs.meshDeviceControl) ...transferCapabilities,
+      ];
 
   final Prefs prefs;
   final BridgeClient client;
+  final DeviceExec _exec;
   final MeshLocationProvider _locationProvider;
   final MeshBatteryProvider _batteryProvider;
   final MeshNameProvider _nameProvider;
@@ -101,13 +121,15 @@ class MeshService {
     ForegroundStarter? foregroundStarter,
     MeshRingHandler? ringHandler,
     MeshSystemInfoProvider? systemInfoProvider,
+    DeviceExec? deviceExec,
   })  : _locationProvider = locationProvider ?? _defaultLocation,
         _batteryProvider = batteryProvider ?? _defaultBattery,
         _nameProvider = nameProvider ?? _defaultName,
         _versionProvider = versionProvider ?? _defaultVersion,
         _foregroundStarter = foregroundStarter ?? _startForeground,
         _ringHandler = ringHandler ?? _defaultRing,
-        _systemInfoProvider = systemInfoProvider ?? _defaultSystemInfo;
+        _systemInfoProvider = systemInfoProvider ?? _defaultSystemInfo,
+        _exec = deviceExec ?? DeviceExec();
 
   bool get running => _running;
 
@@ -162,7 +184,7 @@ class MeshService {
       'appVersion': await _versionProvider(),
       if (battery.percent != null) 'battery': battery.percent,
       if (battery.charging != null) 'charging': battery.charging,
-      'capabilities': capabilities,
+      'capabilities': capabilitiesFor(prefs),
     });
   }
 
@@ -231,8 +253,78 @@ class MeshService {
           data = await _statusPayload();
           ok = true;
           break;
+        case 'upload_file': // streamed pull: device → daemon, one HTTP POST
+          if (!prefs.meshDeviceControl) {
+            message = 'Device control is disabled on this device.';
+            break;
+          }
+          final upToken = params['token'];
+          final upPath = params['path'];
+          if (upToken is! String || upToken.isEmpty || upPath is! String) {
+            message = 'upload_file needs token and path.';
+            break;
+          }
+          final src = File(upPath);
+          if (!await src.exists()) {
+            message = 'No such file: $upPath';
+            break;
+          }
+          final sent = await client.uploadFile(
+            upToken,
+            src.openRead(),
+            await src.length(),
+          );
+          ok = true;
+          data = {'bytes': sent};
+          break;
+        case 'download_file': // streamed push: daemon → device, one HTTP GET
+          if (!prefs.meshDeviceControl) {
+            message = 'Device control is disabled on this device.';
+            break;
+          }
+          final downToken = params['token'];
+          final downPath = params['path'];
+          if (downToken is! String || downToken.isEmpty || downPath is! String) {
+            message = 'download_file needs token and path.';
+            break;
+          }
+          final dest = File(downPath);
+          await Directory(dest.parent.path).create(recursive: true);
+          // Stream to a temp file and rename, so a dropped connection can't
+          // leave a half-written destination.
+          final part = File('$downPath.part');
+          final sink = part.openWrite();
+          int written;
+          try {
+            written = await client.downloadFile(downToken, (chunk) async {
+              sink.add(chunk);
+            });
+            await sink.flush();
+            await sink.close();
+            await part.rename(downPath);
+          } catch (e) {
+            await sink.close().catchError((_) {});
+            await part.delete().catchError((_) => part);
+            rethrow;
+          }
+          ok = true;
+          data = {'bytesWritten': written};
+          break;
         default:
-          message = 'This app version does not support "$name".';
+          // Exec/filesystem commands (the teleport substrate) — only when the
+          // user has device control enabled.
+          if (prefs.meshDeviceControl) {
+            final outcome = await _exec.handle(name, params);
+            if (outcome != null) {
+              ok = outcome.ok;
+              message = outcome.message;
+              data = outcome.data;
+              break;
+            }
+          }
+          message = prefs.meshDeviceControl
+              ? 'This app version does not support "$name".'
+              : 'Device control is disabled on this device.';
       }
     } catch (e) {
       ok = false;

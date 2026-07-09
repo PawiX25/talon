@@ -27,7 +27,13 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import type { Readable } from "node:stream";
+import { dirs } from "../../util/paths.js";
 import { MeshRegistry } from "./registry.js";
+import { TransferStore } from "./transfers.js";
 import type {
   DeviceCommand,
   DeviceCommandResult,
@@ -61,6 +67,42 @@ const MOBILE_PLATFORMS = new Set(["android", "ios"]);
 const DEFAULT_HISTORY_HOURS = 24;
 const MAX_HISTORY_LINES = 24;
 
+// ── Exec / filesystem channel ───────────────────────────────────────────────
+/** Default wall-clock budget for a remote shell command. */
+const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
+/** Hard ceiling on a caller-requested exec timeout. */
+const MAX_EXEC_TIMEOUT_MS = 300_000;
+/** Timeout for a single filesystem command (list/stat/one chunk/etc.). */
+const FS_COMMAND_TIMEOUT_MS = 30_000;
+/**
+ * Bytes of file payload per FALLBACK transfer chunk (base64 on the wire).
+ * The chunked command channel costs one full mesh round trip per chunk, so
+ * it's only used for app builds that don't advertise the streaming commands
+ * (`upload_file`/`download_file`) — modern builds move file bodies as a
+ * single raw HTTP stream instead (see TransferStore). 1MB keeps even the
+ * fallback tolerable without bloating a single SSE frame too far.
+ */
+const FILE_CHUNK_BYTES = 1024 * 1024;
+/** Wall-clock budget for one streamed transfer (command dispatch → done). */
+const STREAM_TRANSFER_TIMEOUT_MS = 60 * 60 * 1000;
+/** readFileBytes switches to the streaming path above this size. */
+const STREAM_READ_THRESHOLD_BYTES = 4 * 1024 * 1024;
+/**
+ * No policy size cap on transfers — a transfer is attempted whatever the
+ * size and fails with a concrete error when a real limit bites (device read
+ * error, stream timeout, disk). The streamed paths are disk-to-disk and
+ * never hold the file in daemon memory; only the chunked FALLBACK and
+ * readFileBytes (whose callers need a Buffer) are memory-bound.
+ */
+/**
+ * Where pulled device files land on the daemon host when no dest is given.
+ * Resolved lazily (not at module load) so a test that mocks `util/paths`
+ * doesn't hit its workspace binding before initialization.
+ */
+function pullDir(): string {
+  return resolve(dirs.workspace, "mesh-pull");
+}
+
 export class MeshService {
   private readonly waiters = new Set<() => void>();
   private readonly transports = new Set<MeshTransport>();
@@ -68,6 +110,16 @@ export class MeshService {
     string,
     (result: DeviceCommandResult) => void
   >();
+  /**
+   * Server-side receipt time (this process's clock) of the last fix per
+   * device. Freshness is judged against THIS, never the device-supplied
+   * `loc.ts` — a companion whose clock runs behind would otherwise have
+   * genuinely fresh fixes rejected (every locate burning the full timeout),
+   * and one running ahead would have stale fixes accepted as fresh.
+   */
+  private readonly receivedAt = new Map<string, number>();
+  /** One-time tokens arranging streamed (single-HTTP-request) transfers. */
+  private readonly transfers = new TransferStore();
   private readonly freshFixTimeoutMs: number;
   private readonly pollIntervalMs: number;
   private readonly commandTimeoutMs: number;
@@ -113,15 +165,21 @@ export class MeshService {
     return this.transports.size > 0;
   }
 
-  async register(body: Record<string, unknown>): Promise<DeviceInfo> {
+  async register(
+    body: Record<string, unknown>,
+    now?: number,
+  ): Promise<DeviceInfo> {
     await this.load();
-    return this.registry.register(body);
+    return this.registry.register(body, now);
   }
 
   /** Store a reported fix and wake anyone waiting on a fresh location. */
   async storeLocation(body: Record<string, unknown>): Promise<DeviceLocation> {
     await this.load();
     const loc = await this.registry.storeLocation(body);
+    // Stamp arrival against our own clock so waitForFreshLocation is immune
+    // to device clock skew.
+    this.receivedAt.set(loc.deviceId, Date.now());
     for (const notify of [...this.waiters]) notify();
     return loc;
   }
@@ -176,6 +234,7 @@ export class MeshService {
     device: DeviceInfo,
     name: string,
     params: Record<string, unknown> = {},
+    timeoutMs = this.commandTimeoutMs,
   ): Promise<DeviceCommandResult> {
     const command: DeviceCommand = {
       id: randomUUID(),
@@ -190,9 +249,9 @@ export class MeshService {
           commandId: command.id,
           deviceId: device.id,
           ok: false,
-          message: `${device.name} did not answer within ${Math.round(this.commandTimeoutMs / 1000)}s (device ${device.online ? "was online" : "appears offline"}).`,
+          message: `${device.name} did not answer within ${Math.round(timeoutMs / 1000)}s (device ${device.online ? "was online" : "appears offline"}).`,
         });
-      }, this.commandTimeoutMs);
+      }, timeoutMs);
       timer.unref?.();
       this.pendingCommands.set(command.id, (result) => {
         clearTimeout(timer);
@@ -234,18 +293,23 @@ export class MeshService {
     if (!target) return this.noSuchDevice(query);
     const requestedAt = Date.now();
     // Only wait out the fresh-fix window when a transport can actually
-    // deliver the locate — otherwise answer from persistence immediately.
+    // deliver the locate AND the device is currently present — pinging an
+    // offline device just burns the whole timeout for a fix that won't come,
+    // so answer from persistence immediately in that case.
     const dispatched = this.requestLocate(target.id);
-    const fresh = dispatched
-      ? await this.waitForFreshLocation(target.id, requestedAt)
-      : undefined;
+    const fresh =
+      dispatched && target.online
+        ? await this.waitForFreshLocation(target.id, requestedAt)
+        : undefined;
     const loc = fresh ?? this.registry.getLocation(target.id);
     if (!loc) {
       return {
         ok: false,
-        text: dispatched
-          ? `No location is known for ${target.name}. A locate request was sent, but no fix arrived within ${Math.round(this.freshFixTimeoutMs / 1000)}s.`
-          : `No location is known for ${target.name}, and no companion transport is connected to request one.`,
+        text: !dispatched
+          ? `No location is known for ${target.name}, and no companion transport is connected to request one.`
+          : target.online
+            ? `No location is known for ${target.name}. A locate request was sent, but no fix arrived within ${Math.round(this.freshFixTimeoutMs / 1000)}s.`
+            : `No location is known for ${target.name}, and it appears offline (last seen ${age(Date.now() - target.lastSeen)}).`,
       };
     }
     return { ok: true, text: this.locationSummary(target, loc) };
@@ -289,6 +353,473 @@ export class MeshService {
     return this.commandTool(query, "status", {});
   }
 
+  // ── Exec + filesystem tools (teleport substrate) ───────────────────────────
+
+  /**
+   * Run a shell command on a device and return its stdout/stderr/exit code.
+   * The primitive under `device_exec` and the teleported native `bash` tool.
+   */
+  async execOnDevice(
+    query: unknown,
+    cmd: unknown,
+    cwd?: unknown,
+    timeoutSec?: unknown,
+  ): Promise<MeshToolResult> {
+    const command = typeof cmd === "string" ? cmd : "";
+    if (!command.trim()) {
+      return { ok: false, text: "No command given to run on the device." };
+    }
+    const budgetMs = clampExecTimeout(timeoutSec);
+    const dispatched = await this.dispatchCommand(
+      query,
+      "exec",
+      {
+        cmd: command,
+        ...(typeof cwd === "string" && cwd.trim() ? { cwd: cwd.trim() } : {}),
+        timeoutMs: budgetMs,
+      },
+      budgetMs + 5_000, // let the device's own timeout fire first
+    );
+    if ("error" in dispatched) return { ok: false, text: dispatched.error };
+    return {
+      ok: dispatched.result.ok,
+      text: formatExecResult(dispatched.target, dispatched.result),
+    };
+  }
+
+  /** `device_list_dir`: list a directory on the device. */
+  async listDirOnDevice(
+    query: unknown,
+    path: unknown,
+  ): Promise<MeshToolResult> {
+    const dir = requirePath(path);
+    if (!dir) return { ok: false, text: "A directory path is required." };
+    const dispatched = await this.dispatchCommand(
+      query,
+      "list_dir",
+      { path: dir },
+      FS_COMMAND_TIMEOUT_MS,
+    );
+    if ("error" in dispatched) return { ok: false, text: dispatched.error };
+    const { target, result } = dispatched;
+    if (!result.ok) {
+      return { ok: false, text: result.message ?? `Could not list ${dir}.` };
+    }
+    const entries = Array.isArray(result.data?.entries)
+      ? (result.data!.entries as Array<Record<string, unknown>>)
+      : [];
+    if (entries.length === 0) {
+      return { ok: true, text: `${dir} on ${target.name} is empty.` };
+    }
+    const lines = entries.map((e) => {
+      const name = String(e.name ?? "?");
+      const type = e.type === "dir" ? "/" : "";
+      const size =
+        typeof e.size === "number" && e.type !== "dir"
+          ? ` (${formatBytes(e.size)})`
+          : "";
+      return `- ${name}${type}${size}`;
+    });
+    return {
+      ok: true,
+      text: `${dir} on ${target.name} — ${entries.length} item(s):\n${lines.join("\n")}`,
+    };
+  }
+
+  /** `device_stat`: metadata for one path on the device. */
+  async statOnDevice(query: unknown, path: unknown): Promise<MeshToolResult> {
+    const p = requirePath(path);
+    if (!p) return { ok: false, text: "A path is required." };
+    const dispatched = await this.dispatchCommand(
+      query,
+      "stat",
+      { path: p },
+      FS_COMMAND_TIMEOUT_MS,
+    );
+    if ("error" in dispatched) return { ok: false, text: dispatched.error };
+    const { result } = dispatched;
+    if (!result.ok) {
+      return { ok: false, text: result.message ?? `Cannot stat ${p}.` };
+    }
+    const d = result.data ?? {};
+    const fields = Object.entries(d)
+      .filter(([, v]) => v !== null && v !== undefined && v !== "")
+      .map(([k, v]) => `${k}: ${String(v)}`);
+    return { ok: true, text: `${p} — ${fields.join(" · ")}` };
+  }
+
+  // ── Streaming transfer bridge surface ─────────────────────────────────────
+  // The HTTP routes on the native bridge delegate here; the token is the
+  // entire authorization (single-use, device- and path-bound).
+
+  /** POST /devices/file — a device streams a pull's file body up. */
+  acceptFileUpload(
+    token: string,
+    body: Readable,
+  ): Promise<{ ok: true; bytes: number } | { ok: false; error: string }> {
+    return this.transfers.acceptUpload(token, body);
+  }
+
+  /** GET /devices/file — a device asks for a push's file body. */
+  openFileDownload(
+    token: string,
+  ): Promise<{ path: string; size: number } | null> {
+    return this.transfers.openDownload(token);
+  }
+
+  /** Streaming is per-command capability — old app builds fall back. */
+  private canStream(
+    target: DeviceInfo,
+    command: "upload_file" | "download_file",
+  ): boolean {
+    return target.capabilities?.includes(command) ?? false;
+  }
+
+  /**
+   * Streamed device→daemon transfer: one command round trip to arrange it,
+   * then the file body arrives as a single raw HTTP request, written
+   * atomically to `dest`. Resolves with the byte count.
+   */
+  private async pullViaStream(
+    target: DeviceInfo,
+    remote: string,
+    dest: string,
+  ): Promise<{ bytes: number } | { error: string }> {
+    const { token, done } = this.transfers.createPull(target.id, dest);
+    const dispatched = await this.dispatchCommand(
+      target.id,
+      "upload_file",
+      { token, path: remote },
+      STREAM_TRANSFER_TIMEOUT_MS,
+    );
+    if ("error" in dispatched) {
+      this.transfers.cancel(token);
+      return { error: dispatched.error };
+    }
+    if (!dispatched.result.ok) {
+      this.transfers.cancel(token);
+      return {
+        error:
+          dispatched.result.message ??
+          `${target.name} could not upload ${remote}.`,
+      };
+    }
+    // The device answers the command AFTER its upload completes, so `done`
+    // is normally already resolved — the grace window only catches a device
+    // that claims success without having streamed anything.
+    try {
+      const bytes = await Promise.race([
+        done,
+        new Promise<never>((_, rej) =>
+          setTimeout(
+            () =>
+              rej(
+                new Error(
+                  `${target.name} reported success but no upload arrived.`,
+                ),
+              ),
+            15_000,
+          ).unref?.(),
+        ),
+      ]);
+      return { bytes };
+    } catch (err) {
+      this.transfers.cancel(token);
+      return { error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Raw file bytes off a device — the structured primitive under both the
+   * human-readable tool below and the native read/edit path (which must not
+   * have to parse a display envelope to recover the content).
+   *
+   * Small files ride the chunked command channel (one round trip). Files
+   * over the streaming threshold are pulled via the streaming path into a
+   * temp file first — the chunked channel pays a full mesh round trip per
+   * chunk and is far too slow for big payloads.
+   */
+  async readFileBytes(
+    query: unknown,
+    path: unknown,
+  ): Promise<{ data: Buffer; deviceName: string } | { error: string }> {
+    const p = requirePath(path);
+    if (!p) return { error: "A file path is required." };
+    await this.load();
+    const target = this.chooseDevice(query);
+    if (target && this.canStream(target, "upload_file")) {
+      const size = await this.statSize(target.id, p);
+      if (size !== undefined && size > STREAM_READ_THRESHOLD_BYTES) {
+        const tmp = join(tmpdir(), `talon-pull-${randomUUID()}-${basename(p)}`);
+        const pulled = await this.pullViaStream(target, p, tmp);
+        if ("error" in pulled) return { error: pulled.error };
+        try {
+          const data = await readFile(tmp);
+          return { data, deviceName: target.name };
+        } catch (err) {
+          return {
+            error: `Pulled ${p} but could not read the temp copy: ${(err as Error).message}`,
+          };
+        } finally {
+          await rm(tmp, { force: true }).catch(() => {});
+        }
+      }
+    }
+    return this.pullBytes(query, p);
+  }
+
+  /** Size of a device path via the `stat` command, if the device can. */
+  private async statSize(
+    deviceId: string,
+    path: string,
+  ): Promise<number | undefined> {
+    const dispatched = await this.dispatchCommand(
+      deviceId,
+      "stat",
+      { path },
+      FS_COMMAND_TIMEOUT_MS,
+    );
+    if ("error" in dispatched || !dispatched.result.ok) return undefined;
+    const size = dispatched.result.data?.size;
+    return typeof size === "number" ? size : undefined;
+  }
+
+  /** `device_read_file`: read a (text) file off the device, chunked. */
+  async readFileFromDevice(
+    query: unknown,
+    path: unknown,
+  ): Promise<MeshToolResult> {
+    const p = requirePath(path);
+    if (!p) return { ok: false, text: "A file path is required." };
+    const buf = await this.readFileBytes(query, p);
+    if ("error" in buf) return { ok: false, text: buf.error };
+    return {
+      ok: true,
+      text: `${p} on ${buf.deviceName} (${formatBytes(buf.data.length)}):\n\n${buf.data.toString("utf8")}`,
+    };
+  }
+
+  /** `device_write_file`: write text content to a file on the device. */
+  async writeFileToDevice(
+    query: unknown,
+    path: unknown,
+    content: unknown,
+  ): Promise<MeshToolResult> {
+    const p = requirePath(path);
+    if (!p) return { ok: false, text: "A file path is required." };
+    const text = typeof content === "string" ? content : "";
+    const written = await this.pushBytes(query, p, Buffer.from(text, "utf8"));
+    if ("error" in written) return { ok: false, text: written.error };
+    return {
+      ok: true,
+      text: `Wrote ${formatBytes(written.bytes)} to ${p} on ${written.deviceName}.`,
+    };
+  }
+
+  /** `device_pull_file`: copy a device file to the daemon host — streamed
+   *  (single HTTP request, disk-to-disk) when the app supports it, chunked
+   *  command-channel fallback otherwise. */
+  async pullFileFromDevice(
+    query: unknown,
+    remotePath: unknown,
+    localPath?: unknown,
+  ): Promise<MeshToolResult> {
+    const remote = requirePath(remotePath);
+    if (!remote) return { ok: false, text: "A remote file path is required." };
+    await this.load();
+    const target = this.chooseDevice(query);
+    if (!target) return this.noSuchDevice(query);
+    const dest =
+      typeof localPath === "string" && localPath.trim()
+        ? resolve(dirs.workspace, localPath.trim())
+        : resolve(
+            pullDir(),
+            `${target.name.replace(/\W+/g, "_")}-${basename(remote)}`,
+          );
+    if (this.canStream(target, "upload_file")) {
+      const started = Date.now();
+      const pulled = await this.pullViaStream(target, remote, dest);
+      if ("error" in pulled) return { ok: false, text: pulled.error };
+      return {
+        ok: true,
+        text: `Pulled ${formatBytes(pulled.bytes)} from ${remote} on ${target.name} → ${dest} (streamed, ${transferRate(pulled.bytes, started)})`,
+      };
+    }
+    const buf = await this.pullBytes(target.id, remote);
+    if ("error" in buf) return { ok: false, text: buf.error };
+    await mkdir(dirname(dest), { recursive: true });
+    await writeFile(dest, buf.data);
+    return {
+      ok: true,
+      text: `Pulled ${formatBytes(buf.data.length)} from ${remote} on ${buf.deviceName} → ${dest} (chunked fallback — update the companion app for streamed transfers)`,
+    };
+  }
+
+  /** `device_push_file`: copy a daemon-host file to the device — streamed
+   *  when the app supports it (never buffers the file in daemon memory),
+   *  chunked command-channel fallback otherwise. */
+  async pushFileToDevice(
+    query: unknown,
+    localPath: unknown,
+    remotePath: unknown,
+  ): Promise<MeshToolResult> {
+    const remote = requirePath(remotePath);
+    if (!remote)
+      return { ok: false, text: "A remote destination path is required." };
+    const local =
+      typeof localPath === "string" && localPath.trim()
+        ? resolve(dirs.workspace, localPath.trim())
+        : "";
+    if (!local) return { ok: false, text: "A local source path is required." };
+    await this.load();
+    const target = this.chooseDevice(query);
+    if (!target) return this.noSuchDevice(query);
+    if (this.canStream(target, "download_file")) {
+      const started = Date.now();
+      const { token } = this.transfers.createPush(target.id, local);
+      const dispatched = await this.dispatchCommand(
+        target.id,
+        "download_file",
+        { token, path: remote },
+        STREAM_TRANSFER_TIMEOUT_MS,
+      );
+      if ("error" in dispatched) {
+        this.transfers.cancel(token);
+        return { ok: false, text: dispatched.error };
+      }
+      if (!dispatched.result.ok) {
+        this.transfers.cancel(token);
+        return {
+          ok: false,
+          text:
+            dispatched.result.message ??
+            `${target.name} could not download ${local}.`,
+        };
+      }
+      const bytes = dispatched.result.data?.bytesWritten;
+      const size = typeof bytes === "number" ? bytes : 0;
+      return {
+        ok: true,
+        text: `Pushed ${formatBytes(size)} to ${remote} on ${target.name} (streamed, ${transferRate(size, started)})`,
+      };
+    }
+    let data: Buffer;
+    try {
+      data = await readFile(local);
+    } catch (err) {
+      // Includes Node's buffer-size ceiling (ERR_FS_FILE_TOO_LARGE) for
+      // files too big to hold in memory — surface the real reason.
+      return {
+        ok: false,
+        text: `Cannot read local file ${local}: ${(err as Error).message}`,
+      };
+    }
+    const written = await this.pushBytes(target.id, remote, data);
+    if ("error" in written) return { ok: false, text: written.error };
+    return {
+      ok: true,
+      text: `Pushed ${formatBytes(written.bytes)} to ${remote} on ${written.deviceName} (chunked fallback — update the companion app for streamed transfers).`,
+    };
+  }
+
+  /**
+   * Chunked read of a remote file into a Buffer. Loops `read_file` with
+   * increasing offsets until the device reports EOF.
+   */
+  private async pullBytes(
+    query: unknown,
+    path: string,
+  ): Promise<{ data: Buffer; deviceName: string } | { error: string }> {
+    const chunks: Buffer[] = [];
+    let offset = 0;
+    let deviceName = "device";
+    for (;;) {
+      const dispatched = await this.dispatchCommand(
+        query,
+        "read_file",
+        { path, offset, len: FILE_CHUNK_BYTES },
+        FS_COMMAND_TIMEOUT_MS,
+      );
+      if ("error" in dispatched) {
+        return {
+          error:
+            offset > 0
+              ? `${dispatched.error} (transfer of ${path} aborted after ${formatBytes(offset)})`
+              : dispatched.error,
+        };
+      }
+      deviceName = dispatched.target.name;
+      const { result } = dispatched;
+      if (!result.ok) {
+        const reason = result.message ?? `Could not read ${path}.`;
+        return {
+          error:
+            offset > 0
+              ? `${reason} (transfer aborted after ${formatBytes(offset)})`
+              : reason,
+        };
+      }
+      const b64 =
+        typeof result.data?.base64 === "string" ? result.data.base64 : "";
+      const chunk = Buffer.from(b64, "base64");
+      chunks.push(chunk);
+      offset += chunk.length;
+      // EOF when the device says so, or when it returns a short/empty chunk.
+      if (result.data?.eof === true || chunk.length < FILE_CHUNK_BYTES) break;
+    }
+    try {
+      return { data: Buffer.concat(chunks), deviceName };
+    } catch (err) {
+      // Node buffer ceiling / out of memory — the one real size limit left.
+      return {
+        error: `${path} transferred ${formatBytes(offset)} but is too large to assemble in daemon memory: ${(err as Error).message}`,
+      };
+    }
+  }
+
+  /**
+   * Chunked write of a Buffer to a remote file. The first chunk truncates the
+   * target; subsequent chunks append at their offset.
+   */
+  private async pushBytes(
+    query: unknown,
+    path: string,
+    data: Buffer,
+  ): Promise<{ bytes: number; deviceName: string } | { error: string }> {
+    let offset = 0;
+    let deviceName = "device";
+    // On a mid-transfer failure the device is left with a partial file —
+    // say so, with how far the transfer got, so the state isn't a mystery.
+    const partial = (reason: string): { error: string } => ({
+      error:
+        offset > 0
+          ? `${reason} (upload aborted — ${path} on the device is a ${formatBytes(offset)} partial write of ${formatBytes(data.length)})`
+          : reason,
+    });
+    // A zero-length write still needs one call to create/truncate the file.
+    do {
+      const chunk = data.subarray(offset, offset + FILE_CHUNK_BYTES);
+      const dispatched = await this.dispatchCommand(
+        query,
+        "write_file",
+        {
+          path,
+          base64: chunk.toString("base64"),
+          offset,
+          truncate: offset === 0,
+        },
+        FS_COMMAND_TIMEOUT_MS,
+      );
+      if ("error" in dispatched) return partial(dispatched.error);
+      deviceName = dispatched.target.name;
+      if (!dispatched.result.ok) {
+        return partial(dispatched.result.message ?? `Could not write ${path}.`);
+      }
+      offset += chunk.length;
+    } while (offset < data.length);
+    return { bytes: data.length, deviceName };
+  }
+
   /**
    * Shared command-tool flow: resolve the target, check its advertised
    * capabilities, require a transport, send, and render the device's answer.
@@ -298,29 +829,53 @@ export class MeshService {
     name: string,
     params: Record<string, unknown>,
   ): Promise<MeshToolResult> {
+    const dispatched = await this.dispatchCommand(query, name, params);
+    if ("error" in dispatched) return { ok: false, text: dispatched.error };
+    return {
+      ok: dispatched.result.ok,
+      text: this.commandSummary(dispatched.target, name, dispatched.result),
+    };
+  }
+
+  /**
+   * Resolve a target, validate capability + reachability, then send the
+   * command and return the raw result — the shared primitive under both the
+   * human-summary command tools (ring/status) and the structured exec/fs
+   * tools that format the payload themselves. Returns `{ error }` for the
+   * pre-flight failures (no device, unsupported, offline, no transport).
+   */
+  async dispatchCommand(
+    query: unknown,
+    name: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<
+    { target: DeviceInfo; result: DeviceCommandResult } | { error: string }
+  > {
     await this.load();
     const target = this.chooseDevice(query);
-    if (!target) return this.noSuchDevice(query);
+    if (!target) return { error: this.noSuchDevice(query).text };
     // Devices advertise what they can do; an explicit list that lacks the
     // command is a clean "can't" — absent list means an older app build, so
     // attempt it and let the timeout speak.
     if (target.capabilities && !target.capabilities.includes(name)) {
       return {
-        ok: false,
-        text: `${target.name} does not support "${name}" (supports: ${target.capabilities.join(", ")}).`,
+        error: `${target.name} does not support "${name}" (supports: ${target.capabilities.join(", ")}).`,
       };
     }
     if (this.transports.size === 0) {
       return {
-        ok: false,
-        text: `No companion transport is connected, so "${name}" cannot reach ${target.name}.`,
+        error: `No companion transport is connected, so "${name}" cannot reach ${target.name}.`,
       };
     }
-    const result = await this.sendCommand(target, name, params);
-    return {
-      ok: result.ok,
-      text: this.commandSummary(target, name, result),
-    };
+    // Don't wait out a full timeout for a device that's plainly gone.
+    if (!target.online) {
+      return {
+        error: `${target.name} appears offline (last seen ${age(Date.now() - target.lastSeen)}), so "${name}" was not sent.`,
+      };
+    }
+    const result = await this.sendCommand(target, name, params, timeoutMs);
+    return { target, result };
   }
 
   /** Resolve a device by exact id, name fragment, or default (most recently
@@ -460,8 +1015,11 @@ export class MeshService {
     deviceId: string,
     requestedAt: number,
   ): Promise<DeviceLocation | undefined> {
-    const existing = this.registry.getLocation(deviceId);
-    if (existing && existing.ts >= requestedAt) return existing;
+    // Judge freshness by server-side arrival time, not the device-reported
+    // `loc.ts` (which is subject to the companion's clock skew).
+    if ((this.receivedAt.get(deviceId) ?? 0) >= requestedAt) {
+      return this.registry.getLocation(deviceId);
+    }
     const deadline = Date.now() + this.freshFixTimeoutMs;
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
@@ -477,8 +1035,9 @@ export class MeshService {
         );
         this.waiters.add(done);
       });
-      const loc = this.registry.getLocation(deviceId);
-      if (loc && loc.ts >= requestedAt) return loc;
+      if ((this.receivedAt.get(deviceId) ?? 0) >= requestedAt) {
+        return this.registry.getLocation(deviceId);
+      }
     }
     return undefined;
   }
@@ -532,6 +1091,54 @@ function age(ms: number): string {
   if (min < 60) return `${min}m ago`;
   const hrs = Math.round(min / 60);
   return `${hrs}h ago`;
+}
+
+/** Clamp a caller-supplied exec timeout (seconds) to the allowed window. */
+function clampExecTimeout(value: unknown): number {
+  const sec = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(sec) || sec <= 0) return DEFAULT_EXEC_TIMEOUT_MS;
+  return Math.min(
+    MAX_EXEC_TIMEOUT_MS,
+    Math.max(1_000, Math.round(sec * 1_000)),
+  );
+}
+
+/** Trim a string path param, returning undefined when blank. */
+function requirePath(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** Render an exec result: exit code headline + stdout/stderr blocks. */
+function formatExecResult(
+  device: DeviceInfo,
+  result: DeviceCommandResult,
+): string {
+  if (!result.ok && !result.data) {
+    return result.message ?? `${device.name} could not run the command.`;
+  }
+  const d = result.data ?? {};
+  const exit = typeof d.exitCode === "number" ? d.exitCode : "?";
+  const stdout = typeof d.stdout === "string" ? d.stdout : "";
+  const stderr = typeof d.stderr === "string" ? d.stderr : "";
+  const parts = [`[${device.name}] exit ${exit}`];
+  if (stdout.trim())
+    parts.push(`--- stdout ---\n${stdout.replace(/\s+$/, "")}`);
+  if (stderr.trim())
+    parts.push(`--- stderr ---\n${stderr.replace(/\s+$/, "")}`);
+  if (!stdout.trim() && !stderr.trim()) parts.push("(no output)");
+  return parts.join("\n");
+}
+
+/** "12.4 MB/s in 3.2s" — observability for streamed transfers. */
+function transferRate(bytes: number, startedAtMs: number): string {
+  const seconds = Math.max((Date.now() - startedAtMs) / 1000, 0.001);
+  return `${formatBytes(bytes / seconds)}/s over ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ── Process-wide instance ─────────────────────────────────────────────────────

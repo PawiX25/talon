@@ -7,9 +7,9 @@
  * MeshService, so the registry stays trivially testable.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { dirs } from "../../util/paths.js";
+import { readArray, writePrivateJson } from "./persist.js";
 import {
   sanitizeCapabilities,
   toDeviceInfo,
@@ -19,7 +19,14 @@ import {
   type DevicePlatform,
 } from "./types.js";
 
-const PRESENCE_TIMEOUT_MS = 90_000;
+/**
+ * A device is offline once it misses several heartbeats. The companion
+ * re-registers every ~60s, so 180s tolerates two dropped beats (transient
+ * radio/network hiccups) before flipping a device offline — wide enough that
+ * a single late beat never flaps presence, tight enough that a genuinely
+ * gone device is marked offline within ~3 minutes.
+ */
+const PRESENCE_TIMEOUT_MS = 180_000;
 const DEVICE_FILE = resolve(dirs.root, "mesh-devices.json");
 const LOCATION_FILE = resolve(dirs.root, "mesh-locations.json");
 const HISTORY_FILE = resolve(dirs.root, "mesh-history.json");
@@ -172,21 +179,6 @@ export class MeshRegistry {
       [...this.history.values()].flat(),
     );
   }
-}
-
-async function readArray<T>(path: string): Promise<T[]> {
-  try {
-    const raw = await readFile(path, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-async function writePrivateJson(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
 function sanitizeDevice(

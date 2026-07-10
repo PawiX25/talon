@@ -14,7 +14,12 @@
 
 import { getDatabase, inTransaction } from "../db.js";
 import { sessionsSql } from "../sql/statements.generated.js";
-import type { SessionState } from "../sessions.js";
+import {
+  emptyMetrics,
+  normaliseMetrics,
+  type SessionMetrics,
+  type SessionState,
+} from "../sessions.js";
 
 type Row = {
   chat_id: string;
@@ -37,7 +42,19 @@ type Row = {
   total_response_ms: number;
   last_response_ms: number;
   fastest_response_ms: number | null;
+  metrics: string | null;
 };
+
+function parseMetrics(raw: string | null): SessionMetrics {
+  if (!raw) return emptyMetrics();
+  try {
+    // Normalise at the load boundary: backfills partial blobs and restores
+    // the Infinity minMs sentinel that JSON round-trips as null.
+    return normaliseMetrics(JSON.parse(raw));
+  } catch {
+    return emptyMetrics();
+  }
+}
 
 function rowToSession(row: Row): SessionState {
   return {
@@ -60,6 +77,7 @@ function rowToSession(row: Row): SessionState {
       // NULL = no timed turn yet — the domain sentinel is Infinity.
       fastestResponseMs: row.fastest_response_ms ?? Infinity,
     },
+    metrics: parseMetrics(row.metrics),
     lastBotMessageId: row.last_bot_message_id ?? undefined,
     sessionName: row.session_name ?? undefined,
     lastModel: row.last_model ?? undefined,
@@ -102,6 +120,7 @@ export function upsert(chatId: string, session: SessionState): void {
       num(usage?.totalResponseMs),
       num(usage?.lastResponseMs),
       typeof fastest === "number" && Number.isFinite(fastest) ? fastest : null,
+      JSON.stringify(session.metrics ?? emptyMetrics()),
     );
 }
 

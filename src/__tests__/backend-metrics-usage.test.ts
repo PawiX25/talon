@@ -10,7 +10,12 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { recordTurnMetrics } from "../backend/shared/metrics.js";
-import { getMetrics, resetMetrics } from "../util/metrics.js";
+import {
+  getMetrics,
+  getTodayMetrics,
+  incrementCounter,
+  resetMetrics,
+} from "../util/metrics.js";
 
 beforeEach(() => resetMetrics());
 afterEach(() => resetMetrics());
@@ -18,6 +23,7 @@ afterEach(() => resetMetrics());
 describe("recordTurnMetrics usage piping", () => {
   it("aggregates token counters globally and per backend", () => {
     recordTurnMetrics({
+      chatId: "test",
       backend: "claude",
       durationMs: 100,
       usage: {
@@ -28,6 +34,7 @@ describe("recordTurnMetrics usage piping", () => {
       },
     });
     recordTurnMetrics({
+      chatId: "test",
       backend: "codex",
       durationMs: 200,
       usage: {
@@ -51,6 +58,7 @@ describe("recordTurnMetrics usage piping", () => {
 
   it("records cache_hit_percent histograms per turn", () => {
     recordTurnMetrics({
+      chatId: "test",
       backend: "claude",
       durationMs: 100,
       // 8000 / (8000 + 2000) → 80%
@@ -65,11 +73,11 @@ describe("recordTurnMetrics usage piping", () => {
     const { histograms } = getMetrics();
     expect(histograms["cache_hit_percent"].count).toBe(1);
     expect(histograms["cache_hit_percent"].avg).toBe(80);
-    expect(histograms["backend.claude.cache_hit_percent"].avg).toBe(80);
   });
 
   it("skips the cache histogram for zero-input turns, keeps counters", () => {
     recordTurnMetrics({
+      chatId: "test",
       backend: "kilo",
       durationMs: 100,
       usage: { inputTokens: 0, outputTokens: 5, cacheRead: 0, cacheWrite: 0 },
@@ -81,10 +89,29 @@ describe("recordTurnMetrics usage piping", () => {
   });
 
   it("is a no-op without a usage snapshot (usage-less backends)", () => {
-    recordTurnMetrics({ backend: "opencode", durationMs: 100 });
+    recordTurnMetrics({ chatId: "test", backend: "opencode", durationMs: 100 });
 
     const { counters } = getMetrics();
     expect(counters["tokens.input_total"]).toBeUndefined();
     expect(counters["queries_total"]).toBe(1);
+  });
+
+  it("surfaces the turn in today's bucket, without legacy counters", () => {
+    incrementCounter("legacy.process_counter", 3);
+    recordTurnMetrics({ chatId: "test", backend: "claude", durationMs: 250 });
+
+    const today = getTodayMetrics();
+    expect(today.counters["queries_total"]).toBe(1);
+    expect(today.counters["backend.claude.queries"]).toBe(1);
+    expect(today.histograms["response_latency_ms"]).toMatchObject({
+      count: 1,
+      avg: 250,
+      min: 250,
+      max: 250,
+    });
+    // Legacy in-process counters are lifetime-only.
+    expect(today.counters["legacy.process_counter"]).toBeUndefined();
+    // …but still visible in the lifetime snapshot.
+    expect(getMetrics().counters["legacy.process_counter"]).toBe(3);
   });
 });

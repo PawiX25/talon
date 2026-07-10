@@ -31,6 +31,10 @@ import {
   setTeleport,
   setTeleportCwd,
 } from "../../mesh/teleport.js";
+import {
+  clampExecOutput,
+  createOutputCapture,
+} from "../../../util/exec-output.js";
 import type { SharedActionHandlers } from "./types.js";
 
 type Result = { ok: boolean; text: string };
@@ -75,16 +79,9 @@ export const nativeHandlers: SharedActionHandlers = {
 async function teleport(chatId: number, query: unknown): Promise<Result> {
   const svc = getMeshService();
   await svc.list();
-  const target = svc.chooseDevice(query);
-  if (!target) {
-    return {
-      ok: false,
-      text:
-        typeof query === "string" && query.trim()
-          ? `No mesh device matches "${query}". Use list_devices to see them.`
-          : "No mesh device to teleport to. Register a companion first.",
-    };
-  }
+  const resolved = svc.resolveDevice(query);
+  if ("error" in resolved) return { ok: false, text: resolved.error };
+  const target = resolved.target;
   if (!target.online) {
     return {
       ok: false,
@@ -148,8 +145,8 @@ function bashLocal(
       env: process.env,
       detached,
     });
-    let stdout = "";
-    let stderr = "";
+    const stdout = createOutputCapture();
+    const stderr = createOutputCapture();
     let killed = false;
     const timer = setTimeout(() => {
       killed = true;
@@ -163,8 +160,8 @@ function bashLocal(
       }
       child.kill("SIGKILL");
     }, timeoutMs);
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
+    child.stdout.on("data", stdout.push);
+    child.stderr.on("data", stderr.push);
     child.on("error", (err) => {
       clearTimeout(timer);
       resolvePromise({ ok: false, text: `Failed to run: ${err.message}` });
@@ -176,7 +173,7 @@ function bashLocal(
         : `exit ${code ?? 0}`;
       resolvePromise({
         ok: !killed && (code ?? 0) === 0,
-        text: renderExec("local", exit, stdout, stderr),
+        text: renderExec("local", exit, stdout.value(), stderr.value()),
       });
     });
   });
@@ -208,6 +205,8 @@ async function bashTeleported(
   const data = result.data ?? {};
   let stdout = typeof data.stdout === "string" ? data.stdout : "";
   const stderr = typeof data.stderr === "string" ? data.stderr : "";
+  const via =
+    typeof data.via === "string" && data.via ? ` via ${data.via}` : "";
   const exitCode =
     typeof data.exitCode === "number" ? data.exitCode : undefined;
   // Recover + strip the trailing cwd marker.
@@ -228,7 +227,12 @@ async function bashTeleported(
   }
   return {
     ok: exitCode === 0,
-    text: renderExec(target.name, `exit ${exitCode ?? "?"}`, stdout, stderr),
+    text: renderExec(
+      `${target.name}${via}`,
+      `exit ${exitCode ?? "?"}`,
+      stdout,
+      stderr,
+    ),
   };
 }
 
@@ -540,13 +544,23 @@ function runLocal(
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolvePromise) => {
     const child = spawn(bin, args, { env: process.env });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("error", () => resolvePromise({ code: 127, stdout, stderr }));
+    const stdout = createOutputCapture();
+    const stderr = createOutputCapture();
+    child.stdout.on("data", stdout.push);
+    child.stderr.on("data", stderr.push);
+    child.on("error", () =>
+      resolvePromise({
+        code: 127,
+        stdout: stdout.value(),
+        stderr: stderr.value(),
+      }),
+    );
     child.on("close", (code) =>
-      resolvePromise({ code: code ?? 0, stdout, stderr }),
+      resolvePromise({
+        code: code ?? 0,
+        stdout: stdout.value(),
+        stderr: stderr.value(),
+      }),
     );
   });
 }
@@ -559,9 +573,13 @@ function renderExec(
 ): string {
   const parts = [`[${where}] ${status}`];
   if (stdout.trim())
-    parts.push(`--- stdout ---\n${stdout.replace(/\s+$/, "")}`);
+    parts.push(
+      `--- stdout ---\n${clampExecOutput(stdout.replace(/\s+$/, ""))}`,
+    );
   if (stderr.trim())
-    parts.push(`--- stderr ---\n${stderr.replace(/\s+$/, "")}`);
+    parts.push(
+      `--- stderr ---\n${clampExecOutput(stderr.replace(/\s+$/, ""))}`,
+    );
   if (!stdout.trim() && !stderr.trim()) parts.push("(no output)");
   return parts.join("\n");
 }

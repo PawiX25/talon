@@ -23,10 +23,15 @@ import 'log.dart';
 ///     system without root. Falls back to app-UID whenever Shizuku is absent
 ///     or denied.
 class DeviceExec {
-  DeviceExec({MethodChannel? shizukuChannel})
-      : _shizuku = shizukuChannel ?? const MethodChannel('talon/shizuku');
+  DeviceExec({
+    MethodChannel? shizukuChannel,
+    bool Function()? isAndroid,
+  })  : _shizuku = shizukuChannel ?? const MethodChannel('talon/shizuku'),
+        _isAndroid = isAndroid ?? (() => !kIsWeb && Platform.isAndroid);
 
   final MethodChannel _shizuku;
+  final bool Function() _isAndroid;
+  Future<bool>? _pendingShizukuPermission;
 
   /// Commands this executor can answer — merged into the device's advertised
   /// mesh capabilities so the daemon gates cleanly.
@@ -42,26 +47,84 @@ class DeviceExec {
   ];
 
   static const int _maxChunkBytes = 256 * 1024;
+  static const Duration _shizukuPermissionWait = Duration(seconds: 12);
+  /// Per-stream cap on exec output shipped back over the mesh. Head + tail
+  /// (not head-only): the daemon's teleport wrapper prints its cwd marker at
+  /// the very END of stdout, and losing it would break cwd tracking.
+  static const int _execOutputHeadBytes = 192 * 1024;
+  static const int _execOutputTailBytes = 64 * 1024;
 
   /// True when Shizuku is available AND has granted permission right now.
   Future<bool> shizukuReady() async {
-    if (kIsWeb || !Platform.isAndroid) return false;
+    if (!_isAndroid()) return false;
     try {
-      final ok = await _shizuku.invokeMethod<bool>('isReady');
-      return ok ?? false;
+      final status =
+          await _shizuku.invokeMapMethod<String, dynamic>('getStatus');
+      return status?['ready'] == true;
     } catch (_) {
       return false;
     }
   }
 
-  /// Ask Shizuku for permission (no-op / false when unavailable).
+  /// Ask Shizuku for permission once. Concurrent commands share a single
+  /// system prompt instead of replacing one another's result callback.
   Future<bool> requestShizuku() async {
-    if (kIsWeb || !Platform.isAndroid) return false;
+    if (!_isAndroid()) return false;
+    return _pendingShizukuPermission ??= _requestShizuku().whenComplete(() {
+      _pendingShizukuPermission = null;
+    });
+  }
+
+  Future<bool> _requestShizuku() async {
     try {
-      final ok = await _shizuku.invokeMethod<bool>('requestPermission');
-      return ok ?? false;
+      final granted = await _shizuku
+          .invokeMethod<bool>('requestPermission')
+          .timeout(_shizukuPermissionWait);
+      // The permission callback is advisory; re-check the binder before
+      // claiming elevated execution is actually available.
+      return granted == true && await shizukuReady();
+    } on TimeoutException {
+      // Dart has stopped waiting, so release the Android-side MethodChannel
+      // result too. A late approval still applies to the next command.
+      unawaited(_cancelShizukuPermissionRequest());
+      return false;
     } catch (_) {
       return false;
+    }
+  }
+
+  Future<void> _cancelShizukuPermissionRequest() async {
+    try {
+      await _shizuku.invokeMethod<void>('cancelPermissionRequest');
+    } catch (_) {
+      // The bridge may have gone away with the activity; the next status check
+      // will report it as unavailable.
+    }
+  }
+
+  /// Prefer elevated Android execution, but never hang the command forever
+  /// waiting for a permission dialog that may be ignored.
+  Future<bool> ensureShizukuReady() async {
+    if (await shizukuReady()) return true;
+    if (!_isAndroid()) return false;
+    return requestShizuku();
+  }
+
+  Future<Map<String, String>> privilegeStatus() async {
+    // Desktop platforms run commands as the logged-in OS user; the
+    // shizuku/app distinction is Android-only.
+    if (!_isAndroid()) return const {'execPrivilege': 'user'};
+    try {
+      final status =
+          await _shizuku.invokeMapMethod<String, dynamic>('getStatus');
+      final ready = status?['ready'] == true;
+      final state = status?['state'];
+      return {
+        'execPrivilege': ready ? 'shizuku' : 'app',
+        'shizuku': state is String ? state : 'unavailable',
+      };
+    } catch (_) {
+      return const {'execPrivilege': 'app', 'shizuku': 'unavailable'};
     }
   }
 
@@ -116,9 +179,12 @@ class DeviceExec {
     if (cmd.trim().isEmpty) {
       return CommandOutcome.fail('No command given.');
     }
-    final budget = Duration(milliseconds: (timeoutMs ?? 60000).clamp(1000, 300000));
-    // Prefer Shizuku (shell UID) when it's ready, else run as the app user.
-    if (await shizukuReady()) {
+    final budget =
+        Duration(milliseconds: (timeoutMs ?? 60000).clamp(1000, 300000));
+    // Prefer Shizuku (shell UID). If it is installed but permission has not
+    // been granted yet, ask once; otherwise a remote filesystem command can
+    // silently run as the app UID and return a misleading scoped-storage view.
+    if (await ensureShizukuReady()) {
       try {
         final res = await _shizuku.invokeMapMethod<String, dynamic>('exec', {
           'cmd': cmd,
@@ -129,8 +195,8 @@ class DeviceExec {
           return CommandOutcome(
             ok: (res['exitCode'] as num?)?.toInt() == 0,
             data: {
-              'stdout': res['stdout'] ?? '',
-              'stderr': res['stderr'] ?? '',
+              'stdout': _CappedOutput.clamp('${res['stdout'] ?? ''}'),
+              'stderr': _CappedOutput.clamp('${res['stderr'] ?? ''}'),
               'exitCode': (res['exitCode'] as num?)?.toInt() ?? -1,
               'via': 'shizuku',
             },
@@ -138,15 +204,29 @@ class DeviceExec {
         }
       } catch (e) {
         AppLog.warn('exec', 'shizuku exec failed, falling back', e);
+        return _execAppUid(
+          cmd,
+          cwd: cwd,
+          budget: budget,
+          privilegeWarning: 'Shizuku exec failed ($e); ran as app UID.',
+        );
       }
     }
-    return _execAppUid(cmd, cwd: cwd, budget: budget);
+    return _execAppUid(
+      cmd,
+      cwd: cwd,
+      budget: budget,
+      privilegeWarning: _isAndroid()
+          ? 'Shizuku not ready or permission not granted; ran as app UID.'
+          : null,
+    );
   }
 
   Future<CommandOutcome> _execAppUid(
     String cmd, {
     String? cwd,
     required Duration budget,
+    String? privilegeWarning,
   }) async {
     final shell = Platform.isWindows ? 'cmd' : 'sh';
     final args = Platform.isWindows ? ['/c', cmd] : ['-c', cmd];
@@ -156,8 +236,13 @@ class DeviceExec {
         args,
         workingDirectory: (cwd != null && cwd.isNotEmpty) ? cwd : null,
       );
-      final outF = proc.stdout.transform(utf8.decoder).join();
-      final errF = proc.stderr.transform(utf8.decoder).join();
+      // Bounded collection: a chatty command must not balloon app memory or
+      // the mesh result payload — the stream keeps draining, extra bytes are
+      // counted and elided.
+      final out = _CappedOutput();
+      final err = _CappedOutput();
+      final outF = proc.stdout.transform(utf8.decoder).forEach(out.add);
+      final errF = proc.stderr.transform(utf8.decoder).forEach(err.add);
       var timedOut = false;
       final timer = Timer(budget, () {
         timedOut = true;
@@ -165,15 +250,24 @@ class DeviceExec {
       });
       final code = await proc.exitCode;
       timer.cancel();
-      final stdout = await outF;
-      final stderr = await errF;
+      await outF;
+      await errF;
+      final stdout = out.value();
+      final stderr = err.value();
       return CommandOutcome(
         ok: !timedOut && code == 0,
         data: {
           'stdout': stdout,
-          'stderr': timedOut ? '$stderr\n[killed: timeout]' : stderr,
+          'stderr': [
+            if (privilegeWarning != null) privilegeWarning,
+            if (stderr.isNotEmpty) stderr,
+            if (timedOut) '[killed: timeout]',
+          ].join('\n'),
           'exitCode': code,
-          'via': 'app',
+          // Only Android has a degraded app-UID mode worth flagging; desktop
+          // shells already run as the OS user.
+          if (_isAndroid()) 'via': 'app',
+          if (privilegeWarning != null) 'privilegeWarning': privilegeWarning,
         },
         message: timedOut ? 'Command timed out.' : null,
       );
@@ -184,9 +278,8 @@ class DeviceExec {
 
   // ── filesystem ────────────────────────────────────────────────────────────
 
-  Future<CommandOutcome> readFile(
-    String path,
-    {required int offset, required int len}) async {
+  Future<CommandOutcome> readFile(String path,
+      {required int offset, required int len}) async {
     if (path.isEmpty) return CommandOutcome.fail('No path.');
     try {
       final file = File(path);
@@ -273,7 +366,8 @@ class DeviceExec {
           'mtime': stat.modified.millisecondsSinceEpoch,
         });
       }
-      entries.sort((a, b) => (a['name'] as String).compareTo(b['name'] as String));
+      entries
+          .sort((a, b) => (a['name'] as String).compareTo(b['name'] as String));
       return CommandOutcome.okData({'entries': entries});
     } catch (e) {
       return CommandOutcome.fail('list_dir failed: $e');
@@ -326,7 +420,9 @@ class DeviceExec {
   }
 
   Future<CommandOutcome> move(String from, String to) async {
-    if (from.isEmpty || to.isEmpty) return CommandOutcome.fail('from/to required.');
+    if (from.isEmpty || to.isEmpty) {
+      return CommandOutcome.fail('from/to required.');
+    }
     try {
       final type = await FileSystemEntity.type(from);
       if (type == FileSystemEntityType.directory) {
@@ -348,7 +444,8 @@ class DeviceExec {
   }
 
   static String? _str(dynamic v) => v is String && v.isNotEmpty ? v : null;
-  static int? _int(dynamic v) => v is num ? v.toInt() : (v is String ? int.tryParse(v) : null);
+  static int? _int(dynamic v) =>
+      v is num ? v.toInt() : (v is String ? int.tryParse(v) : null);
 }
 
 /// Structured result of an on-device command.
@@ -363,4 +460,44 @@ class CommandOutcome {
       CommandOutcome(ok: false, message: message);
   factory CommandOutcome.okData(Map<String, dynamic> data) =>
       CommandOutcome(ok: true, data: data);
+}
+
+/// Bounded exec-output collector: keeps the head and a rolling tail, counts
+/// what it elides. The tail is load-bearing — the daemon's teleport wrapper
+/// emits its cwd marker as the LAST bytes of stdout.
+class _CappedOutput {
+  final StringBuffer _head = StringBuffer();
+  String _tail = '';
+  int _dropped = 0;
+
+  void add(String chunk) {
+    var rest = chunk;
+    final room = DeviceExec._execOutputHeadBytes - _head.length;
+    if (room > 0) {
+      if (rest.length <= room) {
+        _head.write(rest);
+        return;
+      }
+      _head.write(rest.substring(0, room));
+      rest = rest.substring(room);
+    }
+    _tail = _tail + rest;
+    if (_tail.length > DeviceExec._execOutputTailBytes) {
+      _dropped += _tail.length - DeviceExec._execOutputTailBytes;
+      _tail = _tail.substring(_tail.length - DeviceExec._execOutputTailBytes);
+    }
+  }
+
+  String value() {
+    if (_tail.isEmpty) return _head.toString();
+    final note = _dropped > 0 ? '\n…[$_dropped chars truncated]…\n' : '';
+    return '$_head$note$_tail';
+  }
+
+  /// One-shot clamp for output that already arrived as a single string
+  /// (the Shizuku channel hands the whole result over at once).
+  static String clamp(String s) {
+    final out = _CappedOutput()..add(s);
+    return out.value();
+  }
 }

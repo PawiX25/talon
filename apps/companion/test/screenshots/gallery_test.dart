@@ -44,6 +44,23 @@ Future<void> _loadRealFonts() async {
   final icons = FontLoader('MaterialIcons')
     ..addFont(font('MaterialIcons-Regular.otf'));
   await icons.load();
+
+  // Emoji (reaction chips, message text): the SDK font cache has no emoji
+  // font, so anything like 👍 renders as tofu in screenshots — on-device the
+  // platform supplies the fallback. Borrow the system's Noto Color Emoji
+  // when present; skip quietly otherwise.
+  for (final path in const [
+    '/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf', // Debian/Ubuntu
+    '/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf', // Fedora
+  ]) {
+    final f = File(path);
+    if (!f.existsSync()) continue;
+    final bytes = await f.readAsBytes();
+    final emoji = FontLoader('Noto Color Emoji')
+      ..addFont(Future.value(ByteData.view(bytes.buffer)));
+    await emoji.load();
+    break;
+  }
 }
 
 int _ts(int minutesAgo) => DateTime.now()
@@ -180,7 +197,10 @@ Widget _app(Widget home) {
     // fontFamily null (fine on-device — the platform default is used), but in
     // a test that resolves to the blocky FlutterTest font.
     theme: base.copyWith(
-      textTheme: base.textTheme.apply(fontFamily: 'Roboto'),
+      textTheme: base.textTheme.apply(
+        fontFamily: 'Roboto',
+        fontFamilyFallback: const ['Noto Color Emoji'],
+      ),
       appBarTheme: base.appBarTheme.copyWith(
         titleTextStyle:
             base.appBarTheme.titleTextStyle?.copyWith(fontFamily: 'Roboto'),
@@ -233,6 +253,7 @@ void main() {
 
   setUp(() {
     TalonTheme.mode.value = ThemeMode.dark;
+    TalonTheme.accentSeed.value = null;
     TalonTheme.apply(Brightness.dark);
   });
 
@@ -268,6 +289,16 @@ void main() {
     addTearDown(state.dispose);
     await tester.pumpWidget(_app(SettingsScreen(state: state)));
     await _shoot(tester, 'phone_settings');
+  });
+
+  testWidgets('phone · conversation (emerald accent)', (tester) async {
+    _phone(tester);
+    TalonTheme.accentSeed.value = const Color(0xFF3ED598);
+    TalonTheme.apply(Brightness.dark);
+    final state = _demoState(narrow: true, select: 'c1');
+    addTearDown(state.dispose);
+    await tester.pumpWidget(_app(RootView(state: state)));
+    await _shoot(tester, 'phone_chat_accent');
   });
 
   testWidgets('phone · connect (first run)', (tester) async {

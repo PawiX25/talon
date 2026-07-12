@@ -321,20 +321,25 @@ class TalonType {
   TalonType._();
 
   static TextStyle get display => TextStyle(
+        fontFamily: _fontFamily,
         fontSize: 22,
         height: 1.2,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.4,
         color: TalonColors.text,
       );
 
   static TextStyle get title => TextStyle(
+        fontFamily: _fontFamily,
         fontSize: 16,
         height: 1.3,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.2,
         color: TalonColors.text,
       );
 
   static TextStyle get subtitle => TextStyle(
+        fontFamily: _fontFamily,
         fontSize: 14,
         height: 1.3,
         fontWeight: FontWeight.w600,
@@ -342,18 +347,21 @@ class TalonType {
       );
 
   static TextStyle get body => TextStyle(
+        fontFamily: _fontFamily,
         fontSize: 14,
         height: 1.5,
         color: TalonColors.text,
       );
 
   static TextStyle get label => TextStyle(
+        fontFamily: _fontFamily,
         fontSize: 13,
         height: 1.3,
         color: TalonColors.textDim,
       );
 
   static TextStyle get caption => TextStyle(
+        fontFamily: _fontFamily,
         fontSize: 12,
         height: 1.4,
         color: TalonColors.textFaint,
@@ -361,6 +369,7 @@ class TalonType {
 
   /// All-caps section eyebrow (sidebar groups, settings section headers).
   static TextStyle get eyebrow => TextStyle(
+        fontFamily: _fontFamily,
         fontSize: 11,
         height: 1.2,
         fontWeight: FontWeight.w700,
@@ -370,11 +379,50 @@ class TalonType {
 
   /// Monospace for tool names, code, tabular readouts.
   static TextStyle get mono => TextStyle(
-        fontFamily: 'monospace',
+        fontFamily: 'JetBrains Mono',
         fontSize: 13,
         height: 1.4,
         color: TalonColors.text,
       );
+}
+
+/// Elevation vocabulary: layered soft shadows instead of Material's single
+/// hard umbra, plus an accent-tinted glow for the one primary action per
+/// screen. Getters so they track the active palette.
+class TalonShadows {
+  TalonShadows._();
+
+  /// Resting card / tile.
+  static List<BoxShadow> get soft => [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: TalonTheme.isDark ? 0.35 : 0.08),
+          blurRadius: 14,
+          offset: const Offset(0, 4),
+        ),
+      ];
+
+  /// Floating surface (composer, sheets, FABs).
+  static List<BoxShadow> get raised => [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: TalonTheme.isDark ? 0.45 : 0.10),
+          blurRadius: 24,
+          offset: const Offset(0, 8),
+        ),
+        BoxShadow(
+          color: Colors.black.withValues(alpha: TalonTheme.isDark ? 0.30 : 0.06),
+          blurRadius: 6,
+          offset: const Offset(0, 2),
+        ),
+      ];
+
+  /// Accent-tinted glow for the primary action (send button, new chat).
+  static List<BoxShadow> get glow => [
+        BoxShadow(
+          color: TalonColors.accent.withValues(alpha: 0.38),
+          blurRadius: 18,
+          offset: const Offset(0, 4),
+        ),
+      ];
 }
 
 /// Shared motion vocabulary so every surface animates with the same rhythm.
@@ -427,8 +475,15 @@ ThemeData buildTalonTheme() {
           fontFamily: _fontFamily,
         )
         .copyWith(
+          // NOTE: copyWith REPLACES these styles wholesale (it does not merge
+          // with the apply() above), so they must carry the font family
+          // themselves — TalonType styles do. A bare TextStyle here silently
+          // drops the family for everything that inherits bodyMedium.
           bodyMedium: TalonType.body,
-          titleMedium: const TextStyle(fontWeight: FontWeight.w600),
+          titleMedium: const TextStyle(
+            fontFamily: _fontFamily,
+            fontWeight: FontWeight.w600,
+          ),
         ),
     splashFactory: InkSparkle.splashFactory,
     // Pushed routes (Settings, Connect) use transparent AppBars over the
@@ -489,5 +544,7 @@ ThemeData buildTalonTheme() {
   );
 }
 
-/// Prefer a clean system UI font; Flutter falls back per-platform when absent.
-const String? _fontFamily = null;
+/// Bundled UI typeface (see pubspec fonts). Inter everywhere means the app
+/// renders identically on Android, Windows, macOS, and Linux instead of
+/// inheriting whatever the platform default happens to be.
+const String _fontFamily = 'Inter';

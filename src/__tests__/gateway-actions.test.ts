@@ -117,18 +117,14 @@ function mockResponse(opts: {
   contentType?: string;
   body?: string;
   arrayBuffer?: ArrayBuffer;
-  json?: unknown;
 }): Response {
   const headers = new Headers();
   if (opts.contentType) headers.set("content-type", opts.contentType);
-  return {
-    ok: opts.ok ?? true,
-    status: opts.status ?? 200,
+  const body = opts.arrayBuffer ?? opts.body ?? "";
+  return new Response(body, {
+    status: opts.status ?? (opts.ok === false ? 500 : 200),
     headers,
-    text: async () => opts.body ?? "",
-    json: async () => opts.json ?? {},
-    arrayBuffer: async () => opts.arrayBuffer ?? new ArrayBuffer(0),
-  } as unknown as Response;
+  });
 }
 
 /** Create an ArrayBuffer with valid image magic bytes. */
@@ -140,7 +136,11 @@ function imageBuffer(
   const view = new Uint8Array(buf);
   switch (type) {
     case "png":
-      view.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      // Signature plus the IHDR chunk header every real PNG starts with.
+      view.set([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52,
+      ]);
       break;
     case "jpg":
       view.set([0xff, 0xd8, 0xff, 0xe0]);
@@ -154,6 +154,17 @@ function imageBuffer(
       ]);
       break;
   }
+  return buf;
+}
+
+function documentBuffer(type: "pdf" | "zip", size = 1024): ArrayBuffer {
+  const buf = new ArrayBuffer(Math.max(size, 16));
+  const view = new Uint8Array(buf);
+  view.set(
+    type === "pdf"
+      ? new TextEncoder().encode("%PDF-1.7")
+      : [0x50, 0x4b, 0x03, 0x04],
+  );
   return buf;
 }
 
@@ -422,8 +433,100 @@ describe("gateway shared actions", () => {
       expect(result?.text).toContain('"key": "value"');
     });
 
-    it("truncates large text content to 8000 chars", async () => {
-      const longText = "A".repeat(10000);
+    it("returns structured JSON media types as text", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce(
+          mockResponse({
+            ok: true,
+            contentType: "application/problem+json",
+            body: '{"title":"Rate limited","status":429}',
+          }),
+        ),
+      );
+
+      const result = await handleSharedAction(
+        { action: "fetch_url", url: "https://api.example.com/problem" },
+        123,
+      );
+
+      expect(result?.ok).toBe(true);
+      expect(result?.text).toContain("Rate limited");
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it("returns short JSON bodies verbatim instead of discarding them", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce(
+          mockResponse({
+            ok: true,
+            contentType: "application/json",
+            body: '{"status":"ok"}',
+          }),
+        ),
+      );
+
+      const result = await handleSharedAction(
+        { action: "fetch_url", url: "https://api.example.com/health" },
+        123,
+      );
+
+      expect(result).toEqual({ ok: true, text: '{"status":"ok"}' });
+    });
+
+    it("decodes text using the response charset", async () => {
+      const encoded = Uint8Array.from(
+        Buffer.from("Hello from a UTF-16 page — café", "utf16le"),
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce(
+          mockResponse({
+            ok: true,
+            contentType: "text/plain; charset=utf-16le",
+            arrayBuffer: encoded.buffer,
+          }),
+        ),
+      );
+
+      const result = await handleSharedAction(
+        { action: "fetch_url", url: "https://example.com/utf16" },
+        123,
+      );
+
+      expect(result).toEqual({
+        ok: true,
+        text: "Hello from a UTF-16 page — café",
+      });
+    });
+
+    it("sniffs headerless HTML as text instead of saving it as binary", async () => {
+      const encoded = new TextEncoder().encode(
+        "<!doctype html><html><body><h1>Headerless page content is readable</h1></body></html>",
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce(
+          mockResponse({
+            ok: true,
+            arrayBuffer: encoded.buffer,
+          }),
+        ),
+      );
+
+      const result = await handleSharedAction(
+        { action: "fetch_url", url: "https://example.com/headerless" },
+        123,
+      );
+
+      expect(result?.ok).toBe(true);
+      expect(result?.text).toContain("Headerless page content is readable");
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it("truncates large text content with an explicit marker", async () => {
+      const longText = "A".repeat(60_000);
       const mockFetch = vi.fn().mockResolvedValueOnce(
         mockResponse({
           ok: true,
@@ -439,7 +542,9 @@ describe("gateway shared actions", () => {
       );
 
       expect(result?.ok).toBe(true);
-      expect(result?.text!.length).toBe(8000);
+      expect(result?.text!.startsWith("AAA")).toBe(true);
+      expect(result?.text).toContain("[Content truncated at 50000 characters]");
+      expect(result?.text!.length).toBeLessThan(60_000);
     });
 
     it("returns message for pages with no readable content", async () => {
@@ -630,7 +735,7 @@ describe("gateway shared actions", () => {
     });
 
     it("downloads PDF file", async () => {
-      const buffer = new ArrayBuffer(4096);
+      const buffer = documentBuffer("pdf", 4096);
       const mockFetch = vi.fn().mockResolvedValueOnce(
         mockResponse({
           ok: true,
@@ -651,7 +756,7 @@ describe("gateway shared actions", () => {
     });
 
     it("downloads ZIP file", async () => {
-      const buffer = new ArrayBuffer(8192);
+      const buffer = documentBuffer("zip", 8192);
       const mockFetch = vi.fn().mockResolvedValueOnce(
         mockResponse({
           ok: true,
@@ -714,7 +819,7 @@ describe("gateway shared actions", () => {
     });
 
     it("does not create uploads directory when it exists", async () => {
-      const buffer = new ArrayBuffer(256);
+      const buffer = imageBuffer("png", 256);
       const mockFetch = vi.fn().mockResolvedValueOnce(
         mockResponse({
           ok: true,
@@ -733,8 +838,8 @@ describe("gateway shared actions", () => {
       expect(mockMkdirSync).not.toHaveBeenCalled();
     });
 
-    it("rejects files larger than 20MB", async () => {
-      const buffer = new ArrayBuffer(21 * 1024 * 1024); // 21MB
+    it("rejects chunked binary responses larger than 50MB", async () => {
+      const buffer = new ArrayBuffer(51 * 1024 * 1024); // 51MB
       const mockFetch = vi.fn().mockResolvedValueOnce(
         mockResponse({
           ok: true,
@@ -750,8 +855,30 @@ describe("gateway shared actions", () => {
       );
 
       expect(result?.ok).toBe(false);
-      expect(result?.error).toContain("File too large");
-      expect(result?.error).toContain("20MB");
+      expect(result?.error).toContain("Response too large");
+      expect(result?.error).toContain("50MB");
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it("rejects chunked text responses larger than 50MB", async () => {
+      const mockFetch = vi.fn().mockResolvedValueOnce(
+        mockResponse({
+          ok: true,
+          contentType: "text/plain",
+          body: "A".repeat(51 * 1024 * 1024),
+        }),
+      );
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await handleSharedAction(
+        { action: "fetch_url", url: "https://example.com/huge.txt" },
+        123,
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error: "Response too large (max 50MB)",
+      });
       expect(mockWriteFileSync).not.toHaveBeenCalled();
     });
 
@@ -794,8 +921,56 @@ describe("gateway shared actions", () => {
       );
 
       expect(result?.ok).toBe(false);
-      expect(result?.error).toContain("error page instead of an image");
+      expect(result?.error).toContain("invalid image content");
       expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it("rejects HTML error page disguised as a PDF", async () => {
+      const htmlError = new TextEncoder().encode(
+        "<!DOCTYPE html><html><body>Access denied</body></html>",
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce(
+          mockResponse({
+            ok: true,
+            contentType: "application/pdf",
+            arrayBuffer: htmlError.buffer,
+          }),
+        ),
+      );
+
+      const result = await handleSharedAction(
+        { action: "fetch_url", url: "https://example.com/report.pdf" },
+        123,
+      );
+
+      expect(result?.ok).toBe(false);
+      expect(result?.error).toContain("invalid pdf content");
+      expect(result?.error).toContain("Access denied");
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it("detects PDF magic bytes when the server uses a generic content type", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce(
+          mockResponse({
+            ok: true,
+            contentType: "application/octet-stream",
+            arrayBuffer: documentBuffer("pdf"),
+          }),
+        ),
+      );
+
+      const result = await handleSharedAction(
+        { action: "fetch_url", url: "https://example.com/download" },
+        123,
+      );
+
+      expect(result?.ok).toBe(true);
+      expect(result?.text).toContain("Downloaded pdf");
+      expect(result?.text).toContain(".pdf");
     });
 
     it("rejects empty response", async () => {
@@ -842,7 +1017,7 @@ describe("gateway shared actions", () => {
     });
 
     it("labels non-image binary as content subtype", async () => {
-      const buffer = new ArrayBuffer(512);
+      const buffer = documentBuffer("pdf", 512);
       const mockFetch = vi.fn().mockResolvedValueOnce(
         mockResponse({
           ok: true,
@@ -1778,11 +1953,11 @@ describe("gateway-actions — additional branch coverage", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it("rejects fetch_url when Content-Length header exceeds 20MB (line 152 TRUE branch)", async () => {
-    // Build a response that has a Content-Length header > 20MB
+  it("rejects fetch_url when Content-Length header exceeds the size limit (line 152 TRUE branch)", async () => {
+    // Build a response that has a Content-Length header over the 50MB limit
     const headers = new Headers();
     headers.set("content-type", "text/html");
-    headers.set("content-length", String(25 * 1024 * 1024)); // 25MB
+    headers.set("content-length", String(55 * 1024 * 1024)); // 55MB
     const bigResponse = {
       ok: true,
       status: 200,

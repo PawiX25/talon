@@ -3,11 +3,34 @@
  * binary content (validated by magic bytes) into the uploads workspace.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import {
+  readBodyLimited,
+  ResponseTooLargeError,
+} from "../../../util/http-body.js";
+import {
+  advertisedBinaryKind,
+  decodeText,
+  detectBinaryType,
+  extractText,
+  isHtmlContent,
+  isTextContent,
+  matchesBinaryKind,
+} from "../../../util/web-content.js";
 import { dirs } from "../../../util/paths.js";
-import { extractText } from "./shared.js";
 import type { SharedActionHandlers } from "./types.js";
+
+const MAX_RESPONSE_MB = 50;
+const MAX_RESPONSE_BYTES = MAX_RESPONSE_MB * 1024 * 1024;
+const MAX_TEXT_CHARS = 50_000;
+
+/** Cap returned text, marking the cut so truncation is never silent. */
+function capText(text: string): string {
+  if (text.length <= MAX_TEXT_CHARS) return text;
+  return `${text.slice(0, MAX_TEXT_CHARS)}\n\n[Content truncated at ${MAX_TEXT_CHARS} characters]`;
+}
 
 export const fetchUrlHandlers: SharedActionHandlers = {
   fetch_url: async (body) => {
@@ -32,84 +55,75 @@ export const fetchUrlHandlers: SharedActionHandlers = {
 
       // Reject oversized responses before downloading the body.
       // The Content-Length header is advisory but saves bandwidth when present.
-      const MAX_BYTES = 20 * 1024 * 1024; // 20 MB
       const contentLength = resp.headers.get("content-length");
-      if (contentLength && Number(contentLength) > MAX_BYTES) {
+      if (contentLength && Number(contentLength) > MAX_RESPONSE_BYTES) {
         return {
           ok: false,
-          error: `File too large (${(Number(contentLength) / 1024 / 1024).toFixed(0)}MB, max 20MB)`,
+          error: `File too large (${(Number(contentLength) / 1024 / 1024).toFixed(0)}MB, max ${MAX_RESPONSE_MB}MB)`,
         };
       }
 
-      // Binary content: download and save to workspace
       const mimeType = ct.split(";")[0].trim().toLowerCase();
-      const isText =
-        mimeType.startsWith("text/") || mimeType === "application/json";
-      if (!isText) {
-        const buffer = Buffer.from(await resp.arrayBuffer());
-        if (buffer.length > MAX_BYTES)
-          return { ok: false, error: "File too large (max 20MB)" };
-        if (buffer.length === 0)
-          return { ok: false, error: "Empty response (0 bytes)" };
-
-        // Validate magic bytes — prevent saving HTML error pages as images
-        // (servers can return error pages with image content-type headers)
-        const magic = buffer.subarray(0, 16);
-        const isRealImage =
-          (magic[0] === 0xff && magic[1] === 0xd8) || // JPEG
-          (magic[0] === 0x89 &&
-            magic[1] === 0x50 &&
-            magic[2] === 0x4e &&
-            magic[3] === 0x47) || // PNG
-          (magic[0] === 0x47 && magic[1] === 0x49 && magic[2] === 0x46) || // GIF
-          (magic[0] === 0x52 &&
-            magic[1] === 0x49 &&
-            magic[2] === 0x46 &&
-            magic[3] === 0x46 &&
-            magic[8] === 0x57 &&
-            magic[9] === 0x45 &&
-            magic[10] === 0x42 &&
-            magic[11] === 0x50); // WebP
-
-        // If content-type says image but bytes say otherwise, treat as text
-        if (ct.startsWith("image/") && !isRealImage) {
-          const text = extractText(buffer.toString("utf-8"), 500);
+      let buffer: Buffer;
+      try {
+        buffer = await readBodyLimited(resp, MAX_RESPONSE_BYTES);
+      } catch (err) {
+        if (err instanceof ResponseTooLargeError) {
           return {
             ok: false,
-            error: `Server returned an error page instead of an image. Content: ${text}`,
+            error: `Response too large (max ${MAX_RESPONSE_MB}MB)`,
           };
         }
+        throw err;
+      }
 
-        const ext = isRealImage
-          ? magic[0] === 0xff
-            ? "jpg"
-            : magic[0] === 0x89
-              ? "png"
-              : magic[0] === 0x47
-                ? "gif"
-                : "webp"
-          : ct.includes("pdf")
-            ? "pdf"
-            : ct.includes("zip")
-              ? "zip"
-              : "bin";
-        const uploadsDir = dirs.uploads;
-        if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
-        const filePath = resolve(uploadsDir, `${Date.now()}-fetched.${ext}`);
-        writeFileSync(filePath, buffer);
-        const typeLabel = isRealImage
-          ? "image"
-          : (ct.split("/")[1]?.split(";")[0] ?? "file");
+      if (isTextContent(mimeType, buffer)) {
+        const trimmed = decodeText(buffer, ct).trim();
+        if (!trimmed)
+          return { ok: true, text: "(Page has no readable content)" };
+
+        // extractText is a DOM extractor — running it on JSON/XML/JavaScript/
+        // plain text strips small payloads like {"status":"ok"} to nothing,
+        // so only HTML (declared or sniffed) goes through it.
+        if (!isHtmlContent(mimeType, trimmed)) {
+          return { ok: true, text: capText(trimmed) };
+        }
+        const text = extractText(trimmed, Number.POSITIVE_INFINITY);
+        if (text.length < 20)
+          return { ok: true, text: "(Page has no readable content)" };
+        return { ok: true, text: capText(text) };
+      }
+
+      if (buffer.length === 0)
+        return { ok: false, error: "Empty response (0 bytes)" };
+
+      const detected = await detectBinaryType(buffer);
+      const advertised = advertisedBinaryKind(mimeType);
+
+      // Do not save an error page or arbitrary bytes under a trusted-looking
+      // image/PDF/ZIP extension merely because the server advertised one.
+      if (advertised && !matchesBinaryKind(advertised, detected, buffer)) {
+        const text = extractText(decodeText(buffer, ct), 500);
         return {
-          ok: true,
-          text: `Downloaded ${typeLabel} (${(buffer.length / 1024).toFixed(0)}KB) to: ${filePath}\nRead it with the Read tool or send it with send(type="file", file_path="${filePath}").`,
+          ok: false,
+          error: `Server returned invalid ${advertised} content.${text ? ` Content: ${text}` : ""}`,
         };
       }
-      const raw = await resp.text();
-      const text = extractText(raw);
-      if (text.length < 20)
-        return { ok: true, text: "(Page has no readable content)" };
-      return { ok: true, text };
+
+      const uploadsDir = dirs.uploads;
+      if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
+      const filePath = resolve(
+        uploadsDir,
+        `${Date.now()}-${randomUUID().slice(0, 8)}-fetched.${detected?.ext ?? "bin"}`,
+      );
+      writeFileSync(filePath, buffer);
+      const typeLabel = detected?.mime.startsWith("image/")
+        ? "image"
+        : (detected?.ext ?? ct.split("/")[1]?.split(";")[0] ?? "file");
+      return {
+        ok: true,
+        text: `Downloaded ${typeLabel} (${(buffer.length / 1024).toFixed(0)}KB) to: ${filePath}\nRead it with the Read tool or send it with send(type="file", file_path="${filePath}").`,
+      };
     } catch (err) {
       return {
         ok: false,

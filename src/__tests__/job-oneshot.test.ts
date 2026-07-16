@@ -84,7 +84,7 @@ function params(): OneShotAgentParams {
 }
 
 function fakeBackground(
-  run: (p: OneShotAgentParams) => Promise<void>,
+  run: BackgroundRunner["runOneShotAgent"],
   evict?: BackgroundRunner["evictOrphanSubprocesses"],
 ): BackgroundRunner {
   return { runOneShotAgent: run, evictOrphanSubprocesses: evict };
@@ -131,6 +131,21 @@ describe("runIsolatedAgent", () => {
       timeoutMs: 1000,
     });
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("resolves with the usage the backend reports", async () => {
+    const usage = {
+      inputTokens: 120,
+      outputTokens: 45,
+      cacheRead: 30,
+      cacheWrite: 5,
+    };
+    const result = await runIsolatedAgent({
+      background: fakeBackground(async () => usage),
+      params: params(),
+      timeoutMs: 1000,
+    });
+    expect(result).toEqual(usage);
   });
 
   it("propagates an agent error without aborting", async () => {

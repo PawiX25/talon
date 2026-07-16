@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -116,30 +117,31 @@ const TalonPalette kTalonDark = TalonPalette(
   ),
 );
 
-/// Paper-white counterpart: same hues, deepened for contrast on light
-/// surfaces (the dark theme's pastel accent and faint grays wash out on
-/// white). Glass becomes ink-tinted instead of white-tinted.
+/// The light theme — the primary, default look. A cool off-white canvas with
+/// crisp white cards, a vivid indigo accent, and a teal partner for the
+/// gradient mark. Tuned to the settings-screen concept: soft ink hairlines,
+/// gentle shadows, colour used in small confident pops.
 const TalonPalette kTalonLight = TalonPalette(
   brightness: Brightness.light,
-  void0: Color(0xFFF2F3F9),
-  void1: Color(0xFFF9FAFD),
-  surface: Color(0xFFFFFFFF),
-  surfaceHi: Color(0xFFE9EBF6),
-  glassFill: Color(0x0A10123B),
-  glassStroke: Color(0x2210123B),
-  accent: Color(0xFF5B6BF0),
-  accent2: Color(0xFF0E9CC7),
-  accentDeep: Color(0xFF4553D6),
-  text: Color(0xFF191B2A),
-  textDim: Color(0xFF4C5069),
-  textFaint: Color(0xFF83879F),
-  ok: Color(0xFF178F62),
+  void0: Color(0xFFEEF0F7), // deepest canvas the cards float on
+  void1: Color(0xFFF5F6FB), // panel base
+  surface: Color(0xFFFFFFFF), // cards / tiles / fields
+  surfaceHi: Color(0xFFEAEDF9), // hover / selected fill
+  glassFill: Color(0x0A171A3D),
+  glassStroke: Color(0x14171A3D), // soft ink hairline around cards
+  accent: Color(0xFF5465ED), // vivid indigo — the signature
+  accent2: Color(0xFF43BACC), // teal partner (brand gradient, hero moments)
+  accentDeep: Color(0xFF4453D6), // pressed / border-on-accent
+  text: Color(0xFF1B1D2A), // near-black slate
+  textDim: Color(0xFF565A70),
+  textFaint: Color(0xFF9095A8),
+  ok: Color(0xFF12A150), // healthy green (dot, shield, "Good" pill)
   warn: Color(0xFFA9720A),
-  bad: Color(0xFFDB3B52),
+  bad: Color(0xFFE5484D), // coral red
   backdrop: LinearGradient(
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
-    colors: [Color(0xFFF0F1F8), Color(0xFFF7F8FC), Color(0xFFEDEFF7)],
+    colors: [Color(0xFFF3F4FB), Color(0xFFF6F7FC), Color(0xFFEFF1FA)],
   ),
 );
 
@@ -154,6 +156,7 @@ class TalonAccents {
   static const List<(String, Color)> presets = [
     ('Cyan', Color(0xFF38C8F0)),
     ('Emerald', Color(0xFF3ED598)),
+    ('Lime', Color(0xFFA3E635)),
     ('Amber', Color(0xFFF5A524)),
     ('Rose', Color(0xFFFF5C8A)),
     ('Violet', Color(0xFFA78BFA)),
@@ -198,6 +201,8 @@ class TalonAccents {
 class TalonTheme {
   TalonTheme._();
 
+  // Auto (follow the OS) is the default; Light/Dark are explicit overrides in
+  // Settings → Appearance.
   static final ValueNotifier<ThemeMode> mode = ValueNotifier(ThemeMode.system);
 
   /// Custom accent seed (null = the default Talon indigo). Persisted by
@@ -215,7 +220,8 @@ class TalonTheme {
   static bool get isDark => _palette.brightness == Brightness.dark;
 
   /// What the current palette was resolved from — used to skip no-op applies
-  /// so [revision] only bumps on an actual visual change.
+  /// so [revision] only bumps on an actual visual change. Seeded to the dark
+  /// key, consistent with the initial [_palette], so the two never disagree.
   static (bool, int?) _appliedKey = (true, null);
 
   /// Resolve [mode] + [accentSeed] against the platform brightness and swap
@@ -279,8 +285,7 @@ class TalonColors {
   static Color get warn => TalonTheme.palette.warn;
   static Color get bad => TalonTheme.palette.bad;
   static LinearGradient get backdrop => TalonTheme.palette.backdrop;
-  static LinearGradient get accentGradient =>
-      TalonTheme.palette.accentGradient;
+  static LinearGradient get accentGradient => TalonTheme.palette.accentGradient;
 }
 
 /// Spacing scale — an 8pt grid (with a 2/4 half-step for tight insets). Snap
@@ -395,7 +400,8 @@ class TalonShadows {
   /// Resting card / tile.
   static List<BoxShadow> get soft => [
         BoxShadow(
-          color: Colors.black.withValues(alpha: TalonTheme.isDark ? 0.35 : 0.08),
+          color:
+              Colors.black.withValues(alpha: TalonTheme.isDark ? 0.35 : 0.08),
           blurRadius: 14,
           offset: const Offset(0, 4),
         ),
@@ -404,12 +410,14 @@ class TalonShadows {
   /// Floating surface (composer, sheets, FABs).
   static List<BoxShadow> get raised => [
         BoxShadow(
-          color: Colors.black.withValues(alpha: TalonTheme.isDark ? 0.45 : 0.10),
+          color:
+              Colors.black.withValues(alpha: TalonTheme.isDark ? 0.45 : 0.10),
           blurRadius: 24,
           offset: const Offset(0, 8),
         ),
         BoxShadow(
-          color: Colors.black.withValues(alpha: TalonTheme.isDark ? 0.30 : 0.06),
+          color:
+              Colors.black.withValues(alpha: TalonTheme.isDark ? 0.30 : 0.06),
           blurRadius: 6,
           offset: const Offset(0, 2),
         ),
@@ -486,6 +494,18 @@ ThemeData buildTalonTheme() {
           ),
         ),
     splashFactory: InkSparkle.splashFactory,
+    // Predictive back on Android: route pops (conversation → chat list,
+    // Settings → home) track the back gesture and peel away with the system
+    // animation. Other platforms keep their native transition feel.
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
+        TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.linux: ZoomPageTransitionsBuilder(),
+        TargetPlatform.windows: ZoomPageTransitionsBuilder(),
+      },
+    ),
     // Pushed routes (Settings, Connect) use transparent AppBars over the
     // backdrop gradient. M3's defaults tint them on scroll and let the bar
     // impose its own system-chrome style — pin both so the bars stay part of

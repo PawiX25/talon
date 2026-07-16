@@ -111,14 +111,14 @@ ClientChat _chat(
     );
 
 List<ClientChat> _demoChats() => [
-      _chat('c1', 'Trip to Kerry', 'Sounds good — booked for Saturday.', 4,
+      _chat('c1', 'Trip to Kerry', '**Sounds good** — booked for Saturday.', 4,
           model: 'opus'),
       _chat('c2', 'VPS disk cleanup', 'Freed 3.1G by pruning old builds.', 38,
           pulse: true),
       _chat('c3', 'Flutter back gesture', 'PopScope handles predictive back.',
           60 * 5),
-      _chat('c4', 'Dinner ideas', 'A ragù wants 3 hours, start early.',
-          60 * 26),
+      _chat(
+          'c4', 'Dinner ideas', 'A ragù wants 3 hours, start early.', 60 * 26),
       _chat('c5', 'Polymarket research', 'Book is thin — sized down to \$2.',
           60 * 24 * 3),
       _chat('c6', 'Server hardening notes', 'fail2ban + keys only, done.',
@@ -138,8 +138,7 @@ Map<String, List<ClientMessage>> _demoMessages() => {
           id: 'm2',
           chatId: 'c1',
           role: Role.assistant,
-          text:
-              "Here's a tight plan:\n\n"
+          text: "Here's a tight plan:\n\n"
               '1. **Saturday am** — Torc Mountain from the Muckross side '
               '(2.5h, runnable ridge views).\n'
               '2. **Saturday pm** — Killarney town, dinner at *Mews* '
@@ -320,6 +319,8 @@ void main() {
 
   testWidgets('phone · chat list', (tester) async {
     _phone(tester);
+    TalonTheme.mode.value = ThemeMode.light;
+    TalonTheme.apply(Brightness.light);
     final state = _demoState(narrow: true);
     addTearDown(state.dispose);
     await tester.pumpWidget(_app(RootView(state: state)));
@@ -346,7 +347,39 @@ void main() {
 
   testWidgets('phone · settings', (tester) async {
     _phone(tester);
+    TalonTheme.mode.value = ThemeMode.light;
+    TalonTheme.apply(Brightness.light);
     final state = _demoState(narrow: true);
+    // Seed a demo snapshot so the status card renders its stat tiles (there's
+    // no live daemon in the gallery).
+    state.appConfig = const ConfigSnapshot(
+      backend: 'claude',
+      frontend: 'telegram',
+      model: 'opus',
+      modelDisplay: 'Opus 4.8',
+      botDisplayName: 'Claudius',
+      timezone: '',
+      pulse: false,
+      pulseIntervalMs: 300000,
+      heartbeat: true,
+      heartbeatIntervalMinutes: 60,
+      dream: false,
+      editable: [
+        'model',
+        'botDisplayName',
+        'timezone',
+        'pulse',
+        'heartbeat',
+        'dream',
+        'pulseIntervalMs',
+        'heartbeatIntervalMinutes',
+      ],
+      healthy: true,
+      uptimeMs: 176400000,
+      sessions: 63,
+      messages: 43,
+      memoryMb: 168,
+    );
     addTearDown(state.dispose);
     await tester.pumpWidget(_app(SettingsScreen(state: state)));
     await _shoot(tester, 'phone_settings');

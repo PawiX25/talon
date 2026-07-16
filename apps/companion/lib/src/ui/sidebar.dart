@@ -10,6 +10,7 @@ import '../theme.dart';
 import 'brand.dart';
 import 'chat_actions.dart';
 import 'glass.dart';
+import 'markdown.dart';
 import 'motion.dart';
 import 'settings_screen.dart';
 import 'status_pill.dart';
@@ -149,7 +150,8 @@ class _SidebarState extends State<Sidebar> {
     }).toList();
 
     final searchingMessages = _query.trim().length >= 2;
-    if (chats.isEmpty && !(searchingMessages && (_searching || _hits.isNotEmpty))) {
+    if (chats.isEmpty &&
+        !(searchingMessages && (_searching || _hits.isNotEmpty))) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(TalonSpace.lg),
@@ -200,8 +202,7 @@ class _SidebarState extends State<Sidebar> {
                 // exist on a phone.
                 onLongPress: () =>
                     showChatActionsSheet(context, widget.state, chat),
-                onDelete: () =>
-                    confirmDeleteChat(context, widget.state, chat),
+                onDelete: () => confirmDeleteChat(context, widget.state, chat),
               );
               // Mobile: swipe a tile left to delete (with the usual confirm).
               // confirmDismiss always resolves false — deletion happens via
@@ -317,7 +318,6 @@ class _SidebarState extends State<Sidebar> {
         if (entry.value.isNotEmpty) _Group(entry.key, entry.value),
     ];
   }
-
 }
 
 class _Group {
@@ -384,8 +384,18 @@ String _relTime(DateTime t) {
   if (diff.inHours < 24) return '${diff.inHours}h';
   if (diff.inDays < 7) return '${diff.inDays}d';
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
   return '${t.day} ${months[t.month - 1]}';
 }
@@ -506,10 +516,9 @@ class _ChatTileState extends State<_ChatTile> {
                       if (widget.chat.preview.isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 1),
-                          child: Text(
-                            widget.chat.preview.replaceAll('\n', ' '),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          child: InlineMarkdownText(
+                            key: ValueKey('chat-preview-${widget.chat.id}'),
+                            data: widget.chat.preview,
                             style: TextStyle(
                                 fontSize: 11.5,
                                 color: TalonColors.textFaint,
@@ -581,8 +590,8 @@ class _NewChatButtonState extends State<_NewChatButton> {
             ),
             boxShadow: [
               BoxShadow(
-                color: TalonColors.accent
-                    .withValues(alpha: _hover ? 0.45 : 0.28),
+                color:
+                    TalonColors.accent.withValues(alpha: _hover ? 0.45 : 0.28),
                 blurRadius: _hover ? 22 : 14,
                 offset: const Offset(0, 4),
               ),
@@ -621,8 +630,8 @@ class _HitTile extends StatelessWidget {
       onTap: onTap,
       borderRadius: TalonRadius.rSm,
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-            horizontal: TalonSpace.sm, vertical: 7),
+        padding:
+            const EdgeInsets.symmetric(horizontal: TalonSpace.sm, vertical: 7),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -646,10 +655,9 @@ class _HitTile extends StatelessWidget {
                       color: TalonColors.textDim,
                     ),
                   ),
-                  Text(
-                    hit.message.text.replaceAll('\n', ' '),
+                  InlineMarkdownText(
+                    data: hit.message.text,
                     maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 12,
                       height: 1.35,

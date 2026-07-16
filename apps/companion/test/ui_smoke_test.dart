@@ -93,6 +93,9 @@ void main() {
       durationMs: 4200,
       tokensIn: 1500,
       tokensOut: 320,
+      tools: [
+        _tool(id: 't1', name: 'Bash', input: {'command': 'ls'}),
+      ],
     );
     await tester.pumpWidget(_host(
       MessageBubble(message: msg, botName: 'Talon'),
@@ -100,10 +103,87 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Talon'), findsOneWidget);
+    expect(find.byKey(const Key('assistant-message-card')), findsOneWidget);
     expect(find.text('Copy'), findsOneWidget);
     // Compact stats: 1.5k in · 320 out · 4.2s
     expect(find.textContaining('1.5k in'), findsOneWidget);
     expect(find.textContaining('4.2s'), findsOneWidget);
+
+    // Anatomy: only the reply lives inside the bubble. The name header, the
+    // tool trace, and the copy/token/duration footer sit outside on the
+    // canvas.
+    final card = find.byKey(const Key('assistant-message-card'));
+    expect(
+        find.descendant(of: card, matching: find.text('Talon')), findsNothing);
+    expect(
+        find.descendant(of: card, matching: find.text('Copy')), findsNothing);
+    expect(find.descendant(of: card, matching: find.textContaining('1.5k in')),
+        findsNothing);
+    expect(find.descendant(of: card, matching: find.byType(ToolTrace)),
+        findsNothing);
+    expect(find.byType(ToolTrace), findsOneWidget);
+  });
+
+  testWidgets('user bubble surfaces its timestamp on touch layouts',
+      (tester) async {
+    final msg = ClientMessage(
+      id: 'm2',
+      chatId: 'c1',
+      role: Role.user,
+      text: 'A quick follow-up',
+      ts: DateTime(2026, 7, 15, 19, 10).millisecondsSinceEpoch,
+    );
+    await tester.pumpWidget(_host(
+      MessageBubble(message: msg, botName: 'Talon'),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('A quick follow-up'), findsOneWidget);
+    expect(find.byKey(const Key('user-message-time')), findsOneWidget);
+    // The bubble stays pinned to the right edge of the row — regression for
+    // the shrink-wrapped column sitting at the start of its flex slot.
+    final bubbleRect =
+        tester.getRect(find.byKey(const Key('user-message-bubble')));
+    final rowWidth = tester.getSize(find.byType(Scaffold)).width;
+    expect(bubbleRect.right, greaterThan(rowWidth - 8));
+    // The timestamp sits under the bubble on the canvas, not inside it.
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('user-message-bubble')),
+        matching: find.byKey(const Key('user-message-time')),
+      ),
+      findsNothing,
+    );
+  });
+
+  testWidgets('grouped rows drop the repeated header / defer the clock',
+      (tester) async {
+    ClientMessage msg(String id, Role role, String text) => ClientMessage(
+          id: id,
+          chatId: 'c1',
+          role: role,
+          text: text,
+          ts: DateTime(2026, 7, 16, 9, 30).millisecondsSinceEpoch,
+        );
+    await tester.pumpWidget(_host(Column(children: [
+      // Assistant run: second row is grouped → header suppressed.
+      MessageBubble(
+          message: msg('a1', Role.assistant, 'First'), botName: 'Talon'),
+      MessageBubble(
+          message: msg('a2', Role.assistant, 'Second'),
+          botName: 'Talon',
+          showHeader: false),
+      // User run: first row grouped-with-next → clock deferred to the last.
+      MessageBubble(
+          message: msg('u1', Role.user, 'One'),
+          botName: 'Talon',
+          showTime: false),
+      MessageBubble(message: msg('u2', Role.user, 'Two'), botName: 'Talon'),
+    ])));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Talon'), findsOneWidget);
+    expect(find.byKey(const Key('user-message-time')), findsOneWidget);
   });
 
   testWidgets('EntranceFx plays through even when enabled flips to false',

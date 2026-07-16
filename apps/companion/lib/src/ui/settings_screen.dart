@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -119,10 +121,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _loading = true;
       _error = null;
     });
+
+    // Device and foreground-service health are useful, but neither is needed
+    // to paint Settings. Refresh them alongside the config request instead of
+    // serialising all three and holding the whole screen behind the result.
+    unawaited(_refreshMeshStatus());
     try {
       final c = await widget.state.loadConfig();
-      await widget.state.refreshMeshDevices();
-      await widget.state.refreshMeshBackgroundHealth();
       if (!mounted) return;
       setState(() {
         _cfg = c;
@@ -140,6 +145,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _error = e.toString();
         });
       }
+    }
+  }
+
+  Future<void> _refreshMeshStatus() async {
+    try {
+      await Future.wait([
+        widget.state.refreshMeshDevices(),
+        widget.state.refreshMeshBackgroundHealth(),
+      ]);
+    } catch (e) {
+      // Mesh status is auxiliary to this screen. Keep the last known state if
+      // the platform query fails; the config UI must remain usable.
+      AppLog.warn('settings', 'mesh status refresh failed', e);
     }
   }
 
@@ -301,8 +319,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: const Text('Talon settings'),
             actions: [
               IconButton(
-                onPressed: _load,
-                icon: const Icon(Icons.refresh),
+                onPressed: _loading ? null : _load,
+                icon: _loading
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh),
                 tooltip: 'Refresh',
               ),
             ],
@@ -312,7 +335,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               padding: const EdgeInsets.all(20),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 560),
-                child: _loading ? const _SettingsSkeleton() : _body(),
+                // Status, Appearance, diagnostics, and connection data are
+                // already local. Paint them on the first frame; only the
+                // daemon-backed cards below use a loading placeholder.
+                child: _body(),
               ),
             ),
           ),
@@ -322,7 +348,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _body() {
-    final cfg = _cfg;
+    // Fall back to the cached snapshot so the status card shows instantly on a
+    // cold start, before the fresh fetch lands.
+    final cfg = _cfg ?? widget.state.appConfig;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -330,7 +358,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 16),
         _appearanceCard(),
         const SizedBox(height: 16),
-        if (cfg == null)
+        if (cfg == null && _loading)
+          const _SettingsSkeleton()
+        else if (cfg == null)
           _Section(
             title: 'Settings unavailable',
             child: Column(
@@ -665,43 +695,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            spacing: 8,
+          // Full-width segmented row: each mode gets the same room, so there
+          // is no dead strip after Dark on wider cards.
+          Row(
             children: [
-              for (final (mode, label, icon) in options)
-                ChoiceChip(
-                  avatar: Icon(
-                    icon,
-                    size: 15,
-                    color: current == mode
-                        ? TalonColors.accent
-                        : TalonColors.textFaint,
+              for (final (i, (mode, label, icon)) in options.indexed) ...[
+                if (i > 0) const SizedBox(width: 8),
+                Expanded(
+                  child: _ModeButton(
+                    label: label,
+                    icon: icon,
+                    selected: current == mode,
+                    onTap: () {
+                      TalonTheme.mode.value = mode;
+                      widget.state.prefs.setThemeMode(switch (mode) {
+                        ThemeMode.light => 'light',
+                        ThemeMode.dark => 'dark',
+                        ThemeMode.system => 'system',
+                      });
+                    },
                   ),
-                  label: Text(label),
-                  selected: current == mode,
-                  showCheckmark: false,
-                  backgroundColor: TalonColors.surface,
-                  selectedColor: TalonColors.accent.withValues(alpha: 0.22),
-                  side: BorderSide(
-                    color: current == mode
-                        ? TalonColors.accent
-                        : TalonColors.glassStroke,
-                  ),
-                  labelStyle: TextStyle(
-                    color: current == mode
-                        ? TalonColors.text
-                        : TalonColors.textDim,
-                    fontSize: 13,
-                  ),
-                  onSelected: (_) {
-                    TalonTheme.mode.value = mode;
-                    widget.state.prefs.setThemeMode(switch (mode) {
-                      ThemeMode.light => 'light',
-                      ThemeMode.dark => 'dark',
-                      ThemeMode.system => 'system',
-                    });
-                  },
                 ),
+              ],
             ],
           ),
           const SizedBox(height: 18),
@@ -710,10 +725,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 10),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
+          _SwatchGrid(
+            swatches: [
               _AccentSwatch(
                 tooltip: 'Talon (default)',
                 gradient: const LinearGradient(
@@ -1033,60 +1046,219 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final s = widget.state;
     final connected = s.conn == ConnState.connected;
     final up = cfg == null ? '' : _fmtUptime(cfg.uptimeMs);
-    return Glass(
-      radius: 18,
+    final healthy = connected && (cfg?.healthy ?? true);
+    final badgeColor = !connected
+        ? TalonColors.bad
+        : (healthy ? TalonColors.ok : TalonColors.warn);
+    return Container(
       padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        // Faint indigo→teal wash so the white stat tiles pop off the card.
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            TalonColors.accent.withValues(alpha: 0.07),
+            TalonColors.accent2.withValues(alpha: 0.05),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: TalonColors.glassStroke, width: 1),
+        boxShadow: TalonShadows.soft,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               Container(
-                width: 10,
-                height: 10,
+                width: 11,
+                height: 11,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: connected ? TalonColors.ok : TalonColors.bad,
                 ),
               ),
-              const SizedBox(width: 8),
-              Text(
-                connected ? 'Connected' : 'Disconnected',
-                style: const TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      connected ? 'Connected' : 'Disconnected',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 18,
+                      ),
+                    ),
+                    Text(
+                      connected
+                          ? (healthy
+                              ? 'Agent online and healthy'
+                              : 'Agent online')
+                          : 'Not connected to the daemon',
+                      style:
+                          TextStyle(fontSize: 13, color: TalonColors.textDim),
+                    ),
+                  ],
                 ),
               ),
-              const Spacer(),
-              if (s.config.canManageDaemon)
-                TextButton.icon(
-                  onPressed: () async {
-                    final r = await s.restartDaemon();
-                    if (mounted && !r.ok && r.detail != null) {
-                      ScaffoldMessenger.of(
-                        context,
-                      ).showSnackBar(SnackBar(content: Text(r.detail!)));
-                    }
-                  },
-                  icon: const Icon(Icons.restart_alt, size: 18),
-                  label: const Text('Restart'),
+              Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: badgeColor.withValues(alpha: 0.14),
                 ),
+                child: Icon(
+                  connected && healthy
+                      ? Icons.verified_user_outlined
+                      : Icons.gpp_maybe_outlined,
+                  size: 22,
+                  color: badgeColor,
+                ),
+              ),
             ],
           ),
           if (cfg != null) ...[
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 18,
-              runSpacing: 10,
+            const SizedBox(height: 16),
+            Row(
               children: [
-                _stat('Backend', cfg.backend),
-                _stat('Sessions', '${cfg.sessions}'),
-                _stat('Messages', '${cfg.messages}'),
-                _stat('Memory', '${cfg.memoryMb} MB'),
-                if (up.isNotEmpty) _stat('Uptime', up),
+                Expanded(
+                    child:
+                        _statTile(Icons.dns_outlined, 'Backend', cfg.backend)),
+                const SizedBox(width: 10),
+                Expanded(
+                    child: _statTile(Icons.account_tree_outlined, 'Sessions',
+                        '${cfg.sessions}')),
               ],
             ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                    child: _statTile(
+                        Icons.forum_outlined, 'Messages', '${cfg.messages}')),
+                const SizedBox(width: 10),
+                Expanded(
+                    child: _statTile(
+                        Icons.memory_outlined, 'Memory', '${cfg.memoryMb} MB')),
+              ],
+            ),
+            if (up.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                      child: _statTile(Icons.schedule_outlined, 'Uptime', up)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _statTile(
+                      Icons.favorite_outline,
+                      'Health',
+                      healthy ? 'Good' : 'Check',
+                      pill: healthy,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ],
+          if (s.config.canManageDaemon) ...[
+            const SizedBox(height: 14),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () async {
+                  final r = await s.restartDaemon();
+                  if (mounted && !r.ok && r.detail != null) {
+                    ScaffoldMessenger.of(
+                      context,
+                    ).showSnackBar(SnackBar(content: Text(r.detail!)));
+                  }
+                },
+                icon: const Icon(Icons.restart_alt, size: 18),
+                label: const Text('Restart daemon'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// A compact stat tile: an indigo icon square, a small uppercase label, and a
+  /// bold value (or a green "Good" pill for the health readout).
+  Widget _statTile(IconData icon, String label, String value,
+      {bool pill = false}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      decoration: BoxDecoration(
+        color: TalonColors.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: TalonColors.glassStroke, width: 1),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 30,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: TalonColors.accent.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(icon, size: 17, color: TalonColors.accent),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label.toUpperCase(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    letterSpacing: 0.6,
+                    fontWeight: FontWeight.w700,
+                    color: TalonColors.textFaint,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                if (pill)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: TalonColors.ok.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      value,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: TalonColors.ok,
+                      ),
+                    ),
+                  )
+                else
+                  Text(
+                    value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -1125,23 +1297,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   // ── Row builders ──────────────────────────────────────────────────────────
-
-  Widget _stat(String label, String value) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label.toUpperCase(),
-            style: TextStyle(
-              fontSize: 10,
-              color: TalonColors.textFaint,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.8,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(value, style: const TextStyle(fontSize: 14)),
-        ],
-      );
 
   Widget _textRow(
     String label,
@@ -1185,7 +1340,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ValueChanged<bool>? onChanged,
   ) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(vertical: 7),
       child: Row(
         children: [
           Expanded(
@@ -1199,13 +1354,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                const SizedBox(height: 2),
                 Text(
                   subtitle,
-                  style: TextStyle(fontSize: 12, color: TalonColors.textFaint),
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.35,
+                    color: TalonColors.textFaint,
+                  ),
                 ),
               ],
             ),
           ),
+          const SizedBox(width: 12),
           // Plain Switch, not .adaptive: this app uses fully custom Material
           // theming everywhere (not platform-native widgets), and .adaptive
           // renders a CupertinoSwitch on macOS/iOS that ignores
@@ -1332,21 +1493,21 @@ class _Section extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Glass(
-      radius: 18,
-      padding: const EdgeInsets.all(18),
+    // A crisp solid card — white surface, hairline border, soft shadow —
+    // floating on the off-white canvas. Not a blurred glass panel: the light
+    // design reads as clean layered paper, not frost.
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: TalonColors.surface,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: TalonColors.glassStroke, width: 1),
+        boxShadow: TalonShadows.soft,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title.toUpperCase(),
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.1,
-              color: TalonColors.textFaint,
-            ),
-          ),
+          Text(title.toUpperCase(), style: TalonType.eyebrow),
           const SizedBox(height: 14),
           child,
         ],
@@ -1397,10 +1558,12 @@ class _ControlButton extends StatelessWidget {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
+                  const SizedBox(height: 2),
                   Text(
                     subtitle,
                     style: TextStyle(
                       fontSize: 12,
+                      height: 1.35,
                       color: TalonColors.textFaint,
                     ),
                   ),
@@ -1505,6 +1668,99 @@ class _ModelRow extends StatelessWidget {
       ),
     );
     if (picked != null) onPick(picked);
+  }
+}
+
+/// One equal-width segment of the Auto / Light / Dark selector.
+class _ModeButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  const _ModeButton({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(999),
+      child: AnimatedContainer(
+        duration: TalonMotion.fast,
+        height: 36,
+        decoration: BoxDecoration(
+          color: selected ? TalonColors.accent : TalonColors.surface,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: selected ? TalonColors.accent : TalonColors.glassStroke,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 15,
+              color: selected ? Colors.white : TalonColors.textFaint,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white : TalonColors.textDim,
+                fontSize: 13,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Balanced accent grid from the glass-settings pass. Ten swatches become
+/// two even rows of five, with free width shared by both margins and gaps.
+class _SwatchGrid extends StatelessWidget {
+  final List<Widget> swatches;
+  const _SwatchGrid({required this.swatches});
+
+  static const double _size = 34;
+  static const double _minGap = 12;
+  static const double _rowGap = 12;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final n = swatches.length;
+        final maxCols = ((constraints.maxWidth + _minGap) / (_size + _minGap))
+            .floor()
+            .clamp(1, n);
+        final rows = (n / maxCols).ceil();
+        final cols = (n / rows).ceil();
+        return Column(
+          children: [
+            for (var r = 0; r < rows; r++) ...[
+              if (r > 0) const SizedBox(height: _rowGap),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (var i = r * cols; i < (r + 1) * cols; i++)
+                    i < n
+                        ? swatches[i]
+                        : const SizedBox(width: _size, height: _size),
+                ],
+              ),
+            ],
+          ],
+        );
+      },
+    );
   }
 }
 

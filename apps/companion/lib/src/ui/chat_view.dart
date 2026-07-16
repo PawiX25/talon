@@ -19,11 +19,18 @@ class ChatView extends StatefulWidget {
   final bool showBack;
   final VoidCallback? onBack;
 
+  /// Phone presentation: no rounded card or canvas tint — the conversation
+  /// sits directly on the app backdrop edge to edge (like Settings), the
+  /// header pads itself under the status bar, and the composer respects the
+  /// bottom system inset.
+  final bool fullBleed;
+
   const ChatView({
     super.key,
     required this.state,
     required this.showBack,
     this.onBack,
+    this.fullBleed = false,
   });
 
   @override
@@ -98,6 +105,14 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
+  /// Whether [a] (earlier) and [b] (later) belong to the same visual run:
+  /// same author, close together in time.
+  static bool _grouped(ClientMessage? a, ClientMessage? b) {
+    if (a == null || b == null) return false;
+    return a.role == b.role &&
+        b.time.difference(a.time).abs() < const Duration(minutes: 3);
+  }
+
   /// A row animates in only the first time we see it AND when it's genuinely
   /// fresh (sent/received seconds ago) — so opening a chat's history doesn't
   /// trigger a cascade of animations.
@@ -139,49 +154,60 @@ class _ChatViewState extends State<ChatView> {
 
   @override
   Widget build(BuildContext context) {
+    final body = ListenableBuilder(
+      listenable: widget.state,
+      builder: (context, _) {
+        final chat = widget.state.selectedChat;
+        if (chat == null) return const _EmptyState();
+        _autoScroll(chat.id, widget.state.messagesFor(chat.id).length);
+        return Column(
+          children: [
+            _Header(
+              state: widget.state,
+              chat: chat,
+              showBack: widget.showBack,
+              onBack: widget.onBack,
+              extendIntoStatusBar: widget.fullBleed,
+            ),
+            if (widget.state.conn != ConnState.connected)
+              _ConnBanner(state: widget.state),
+            Expanded(child: _messages(chat.id)),
+            // top:false — only the bottom (and side) system insets matter
+            // here; in the card presentation the outer SafeArea has already
+            // consumed them and this collapses to a no-op.
+            SafeArea(
+              top: false,
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: _columnMax),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _QueuedBar(state: widget.state, chatId: chat.id),
+                      Composer(
+                        onSend: widget.state.sendMessage,
+                        onUpload: widget.state.uploadImage,
+                        enabled: widget.state.conn == ConnState.connected,
+                        running: widget.state.isTurnRunning(chat.id),
+                        onStop: () => widget.state.interruptTurn(chat.id),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    // Full-bleed (phone): straight onto the app backdrop, like Settings.
+    if (widget.fullBleed) return body;
+    // Card (desktop/tablet pane): rounded clip over a quiet canvas tint.
     return ClipRRect(
       borderRadius: BorderRadius.circular(22),
       child: Container(
         color: TalonColors.void1.withValues(alpha: 0.55),
-        child: ListenableBuilder(
-          listenable: widget.state,
-          builder: (context, _) {
-            final chat = widget.state.selectedChat;
-            if (chat == null) return const _EmptyState();
-            _autoScroll(chat.id, widget.state.messagesFor(chat.id).length);
-            return Column(
-              children: [
-                _Header(
-                  state: widget.state,
-                  chat: chat,
-                  showBack: widget.showBack,
-                  onBack: widget.onBack,
-                ),
-                if (widget.state.conn != ConnState.connected)
-                  _ConnBanner(state: widget.state),
-                Expanded(child: _messages(chat.id)),
-                Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: _columnMax),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _QueuedBar(state: widget.state, chatId: chat.id),
-                        Composer(
-                          onSend: widget.state.sendMessage,
-                          onUpload: widget.state.uploadImage,
-                          enabled: widget.state.conn == ConnState.connected,
-                          running: widget.state.isTurnRunning(chat.id),
-                          onStop: () => widget.state.interruptTurn(chat.id),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
+        child: body,
       ),
     );
   }
@@ -224,7 +250,8 @@ class _ChatViewState extends State<ChatView> {
     }
 
     final topLoader = widget.state.isLoadingOlder(chatId);
-    final itemCount = (topLoader ? 1 : 0) + rows.length + (showActivity ? 1 : 0);
+    final itemCount =
+        (topLoader ? 1 : 0) + rows.length + (showActivity ? 1 : 0);
     return Stack(
       children: [
         Align(
@@ -253,10 +280,25 @@ class _ChatViewState extends State<ChatView> {
                   final row = rows[mi];
                   if (row is DateTime) return _DayDivider(day: row);
                   final m = row as ClientMessage;
+                  // Group consecutive same-role messages (day dividers break
+                  // runs naturally — the neighbor is a DateTime, not a
+                  // message): grouped assistant rows drop the repeated
+                  // avatar/name header, grouped user rows defer the clock to
+                  // the run's last bubble.
+                  final prev = mi > 0 && rows[mi - 1] is ClientMessage
+                      ? rows[mi - 1] as ClientMessage
+                      : null;
+                  final next =
+                      mi + 1 < rows.length && rows[mi + 1] is ClientMessage
+                          ? rows[mi + 1] as ClientMessage
+                          : null;
                   return MessageBubble(
                     message: m,
                     botName: widget.state.status.botName,
                     animateIn: _shouldAnimate(m),
+                    showHeader:
+                        !(m.role == Role.assistant && _grouped(prev, m)),
+                    showTime: !(m.role == Role.user && _grouped(m, next)),
                     // activeConfig, not config: in local auto-discover mode the
                     // saved config lacks the bridge's real port/token, and media
                     // fetched through it 404s or gets rejected.
@@ -327,8 +369,11 @@ class _DayDivider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A single quiet centered pill — no rule lines flanking it. The hairline
+    // dashes read as clutter against the open canvas (and doubly so now the
+    // conversation is full-bleed).
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: TalonSpace.sm),
+      padding: const EdgeInsets.symmetric(vertical: TalonSpace.md),
       child: Center(
         child: Container(
           padding: const EdgeInsets.symmetric(
@@ -338,7 +383,6 @@ class _DayDivider extends StatelessWidget {
           decoration: BoxDecoration(
             color: TalonColors.glassFill,
             borderRadius: TalonRadius.rPill,
-            border: Border.all(color: TalonColors.glassStroke),
           ),
           child: Text(
             _label,
@@ -398,9 +442,8 @@ class _ConnBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final error = state.conn == ConnState.error;
     final color = error ? TalonColors.bad : TalonColors.warn;
-    final text = error
-        ? (state.connError ?? 'Connection lost')
-        : 'Connecting to Talon…';
+    final text =
+        error ? (state.connError ?? 'Connection lost') : 'Connecting to Talon…';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
@@ -451,22 +494,40 @@ class _Header extends StatelessWidget {
   final bool showBack;
   final VoidCallback? onBack;
 
+  /// Pad the bar by the top system inset so its surface runs up under the
+  /// status bar (full-bleed phone presentation, same as Settings' AppBar).
+  final bool extendIntoStatusBar;
+
   const _Header({
     required this.state,
     required this.chat,
     required this.showBack,
     this.onBack,
+    this.extendIntoStatusBar = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final model = chat.model ?? state.status.model;
     final effort = chat.effort ?? 'adaptive';
+    final topInset =
+        extendIntoStatusBar ? MediaQuery.of(context).padding.top : 0.0;
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+      padding: EdgeInsets.fromLTRB(12, 10 + topInset, 8, 10),
       decoration: BoxDecoration(
-        color: TalonColors.glassFill,
+        color: TalonColors.surface.withValues(
+          alpha: TalonTheme.isDark ? 0.68 : 0.92,
+        ),
         border: Border(bottom: BorderSide(color: TalonColors.glassStroke)),
+        boxShadow: TalonTheme.isDark
+            ? null
+            : [
+                BoxShadow(
+                  color: const Color(0xFF171A3D).withValues(alpha: 0.045),
+                  blurRadius: 12,
+                  offset: const Offset(0, 3),
+                ),
+              ],
       ),
       // Auto-detect available width instead of hard-coding a platform check:
       // a desktop window with the sidebar open gives the chat pane less room
@@ -478,6 +539,77 @@ class _Header extends StatelessWidget {
         builder: (context, constraints) {
           final compact = constraints.maxWidth < 560;
           final modelLabel = model.isEmpty ? 'model' : model;
+          if (compact) {
+            return Row(
+              children: [
+                if (showBack)
+                  IconButton(
+                    onPressed: onBack,
+                    tooltip: 'Back to chats',
+                    visualDensity: VisualDensity.compact,
+                    icon: Icon(Icons.adaptive.arrow_back, size: 21),
+                  ),
+                Expanded(
+                  child: InkWell(
+                    key: const Key('conversation-identity'),
+                    onTap: () => openModelSheet(context, state, chat),
+                    borderRadius: TalonRadius.rSm,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 3,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            chat.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TalonType.title.copyWith(fontSize: 16),
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: state.conn == ConnState.connected
+                                      ? TalonColors.ok
+                                      : TalonColors.bad,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Flexible(
+                                child: Text(
+                                  '$modelLabel · $effort',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: TalonColors.textFaint,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                if (chat.context?.known == true) ...[
+                  _ContextChip(context: chat.context!, dense: true),
+                  const SizedBox(width: 2),
+                ],
+                _ChatMenu(state: state, chat: chat),
+              ],
+            );
+          }
           return Row(
             children: [
               if (showBack)
@@ -501,17 +633,7 @@ class _Header extends StatelessWidget {
                 _ContextChip(context: chat.context!),
                 const SizedBox(width: 6),
               ],
-              if (compact)
-                // One pill with just the model. Effort still lives a tap away
-                // in the model sheet; spelling it out here starved the chat
-                // title of width on phones ("Trip to…" next to
-                // "opus · adaptive").
-                _Chip(
-                  icon: Icons.memory,
-                  label: modelLabel,
-                  onTap: () => openModelSheet(context, state, chat),
-                )
-              else ...[
+              ...[
                 _Chip(
                   icon: Icons.memory,
                   label: modelLabel,
@@ -599,7 +721,6 @@ class _ChatMenu extends StatelessWidget {
       ],
     );
   }
-
 }
 
 class _MenuRow extends StatelessWidget {
@@ -627,7 +748,8 @@ class _MenuRow extends StatelessWidget {
 /// figures. Purely informational — no tap action.
 class _ContextChip extends StatelessWidget {
   final ContextInfo context;
-  const _ContextChip({required this.context});
+  final bool dense;
+  const _ContextChip({required this.context, this.dense = false});
 
   static String _fmt(int n) {
     if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
@@ -644,7 +766,10 @@ class _ContextChip extends StatelessWidget {
     return Tooltip(
       message: tip,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        padding: EdgeInsets.symmetric(
+          horizontal: dense ? 8 : 10,
+          vertical: dense ? 5 : 6,
+        ),
         decoration: BoxDecoration(
           color: TalonColors.glassFill,
           borderRadius: BorderRadius.circular(999),
@@ -656,8 +781,8 @@ class _ContextChip extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             SizedBox(
-              width: 13,
-              height: 13,
+              width: dense ? 12 : 13,
+              height: dense ? 12 : 13,
               child: CircularProgressIndicator(
                 value: (context.pct.clamp(0, 100)) / 100,
                 strokeWidth: 2.4,
@@ -668,7 +793,7 @@ class _ContextChip extends StatelessWidget {
             const SizedBox(width: 6),
             Text(
               '${context.pct}%',
-              style: TextStyle(fontSize: 12, color: color),
+              style: TextStyle(fontSize: dense ? 11 : 12, color: color),
             ),
           ],
         ),
@@ -703,8 +828,7 @@ class _QueuedBarState extends State<_QueuedBar> {
 
   void _startEdit(String current) {
     _controller.text = current;
-    _controller.selection =
-        TextSelection.collapsed(offset: current.length);
+    _controller.selection = TextSelection.collapsed(offset: current.length);
     setState(() => _editing = true);
     _focus.requestFocus();
   }
@@ -731,7 +855,8 @@ class _QueuedBarState extends State<_QueuedBar> {
           decoration: BoxDecoration(
             color: TalonColors.accent.withValues(alpha: 0.10),
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: TalonColors.accent.withValues(alpha: 0.35)),
+            border:
+                Border.all(color: TalonColors.accent.withValues(alpha: 0.35)),
           ),
           child: Row(
             children: [
@@ -871,8 +996,7 @@ class _Chip extends StatelessWidget {
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style:
-                    TextStyle(fontSize: 12, color: TalonColors.textDim),
+                style: TextStyle(fontSize: 12, color: TalonColors.textDim),
               ),
             ),
           ],

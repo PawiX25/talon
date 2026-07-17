@@ -17,7 +17,7 @@
 // Uses only node builtins so it runs on the bare runner node in CI
 // without an `npm ci`.
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -76,5 +76,12 @@ if (target) {
 } else {
   outPath = join(repoRoot, "bin", "talon-blake3.node");
 }
-copyFileSync(built, outPath);
+// Install atomically. copyFileSync truncates and rewrites the destination
+// IN PLACE — a running daemon holds this addon dlopen'd (mmap'd), and
+// rewriting its pages underneath it takes the daemon down with SIGBUS.
+// A rename swaps the directory entry instead: the old inode stays mapped
+// until the process exits, and readers see old or new, never a torn one.
+const stagePath = `${outPath}.tmp-${process.pid}`;
+copyFileSync(built, stagePath);
+renameSync(stagePath, outPath);
 console.log(`built ${outPath}${target ? ` (${target})` : " (host)"}`);

@@ -119,6 +119,9 @@ const MAX_DELAY_SEC = 24 * 60 * 60;
 /** Deliver one scheduled entry (shared by the live timer and restore). */
 async function fireScheduled(bot: Bot, entry: ScheduledMessage): Promise<void> {
   const chatId = Number(entry.chatId);
+  // `replyTo` is stored in the owning frontend's native shape (Discord keeps
+  // snowflake strings there); Telegram's API wants a number.
+  const replyTo = toPositiveId(entry.replyTo);
   if (entry.rows) {
     // Validated at schedule time; rebuilt here so entries persisted by an
     // older build (or edited on disk) still can't fail the send.
@@ -128,19 +131,17 @@ async function fireScheduled(bot: Bot, entry: ScheduledMessage): Promise<void> {
         "bot",
         `Scheduled message ${entry.id} has bad buttons: ${built.error}`,
       );
-      await sendText(bot, chatId, entry.text, entry.replyTo);
+      await sendText(bot, chatId, entry.text, replyTo);
       return;
     }
     const keyboard = built.keyboard;
     await bot.api.sendMessage(chatId, markdownToTelegramHtml(entry.text), {
       parse_mode: "HTML",
       reply_markup: { inline_keyboard: keyboard },
-      reply_parameters: entry.replyTo
-        ? { message_id: entry.replyTo }
-        : undefined,
+      reply_parameters: replyTo ? { message_id: replyTo } : undefined,
     });
   } else {
-    await sendText(bot, chatId, entry.text, entry.replyTo);
+    await sendText(bot, chatId, entry.text, replyTo);
   }
 }
 

@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/bridge_models.dart';
 import '../services/autostart.dart';
+import '../services/dynamic_accent.dart';
 import '../services/haptics.dart';
 import '../services/log.dart';
 import '../services/mesh_background.dart';
@@ -87,6 +88,12 @@ class _SettingsScreenState extends State<SettingsScreen>
   bool? _autostart;
   bool _autostartBusy = false;
 
+  /// The platform's own accent (Android's wallpaper palette / the desktop
+  /// accent colour), resolved once so the "Wallpaper" swatch can wear the
+  /// colour it would actually apply instead of a placeholder glyph. Null
+  /// while it's resolving, or where the platform has none.
+  Color? _wallpaperAccent;
+
   /// This app's own version, for the About card ('' until loaded).
   String _appVersion = '';
 
@@ -125,6 +132,11 @@ class _SettingsScreenState extends State<SettingsScreen>
     if (Autostart.isSupported) {
       Autostart.isEnabled().then((v) {
         if (mounted) setState(() => _autostart = v);
+      });
+    }
+    if (DynamicAccent.supported) {
+      DynamicAccent.seed().then((seed) {
+        if (mounted && seed != null) setState(() => _wallpaperAccent = seed);
       });
     }
     PackageInfo.fromPlatform().then((info) {
@@ -490,7 +502,10 @@ class _SettingsScreenState extends State<SettingsScreen>
                     ? _masterDetail()
                     : Center(
                         child: SingleChildScrollView(
-                          padding: const EdgeInsets.all(20),
+                          // Bottom inset: this screen runs under the
+                          // navigation bar like every other phone surface.
+                          padding: EdgeInsets.fromLTRB(
+                              20, 20, 20, 20 + navInset(context)),
                           child: ConstrainedBox(
                             constraints: const BoxConstraints(maxWidth: 560),
                             // Status, Appearance, diagnostics, and connection
@@ -740,7 +755,8 @@ class _SettingsScreenState extends State<SettingsScreen>
           // inheriting the previous chapter's offset, and remounting the
           // subtree is also what re-plays the pane entrance below.
           key: ValueKey('settings-pane-${section.title}'),
-          padding: const EdgeInsets.only(bottom: TalonSpace.xl),
+          padding:
+              EdgeInsets.only(bottom: TalonSpace.xl + navInset(context)),
           child: EntranceFx(
             enabled: !reduceMotion(context),
             // A whisper from the right — enough to read as a pane swap, not
@@ -1367,9 +1383,11 @@ class _SettingsScreenState extends State<SettingsScreen>
       (ThemeMode.dark, 'Dark', Icons.dark_mode_outlined),
     ];
     final seed = TalonTheme.accentSeed.value;
-    final isPreset = seed != null &&
+    final dynamicAccent = widget.state.prefs.accentDynamic;
+    final isPreset = !dynamicAccent &&
+        seed != null &&
         TalonAccents.presets.any((p) => p.$2.toARGB32() == seed.toARGB32());
-    final isCustom = seed != null && !isPreset;
+    final isCustom = !dynamicAccent && seed != null && !isPreset;
     final scale = TalonTheme.textScale.value;
     final mobile = defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS;
@@ -1415,14 +1433,30 @@ class _SettingsScreenState extends State<SettingsScreen>
                 gradient: const LinearGradient(
                   colors: [Color(0xFF7C8CFF), Color(0xFF54E6FF)],
                 ),
-                selected: seed == null,
+                selected: !dynamicAccent && seed == null,
                 onTap: () => _setAccent(null),
               ),
+              // Material You: match whatever colour the system is already
+              // wearing (Android 12+ wallpaper palette, desktop accent). The
+              // swatch wears that colour as soon as it resolves — a picture
+              // glyph on grey read as a broken thumbnail, and told you
+              // nothing about what you were about to pick. The sparkle is
+              // the same mark the voice picker uses for "automatic".
+              if (DynamicAccent.supported)
+                _AccentSwatch(
+                  tooltip: 'Wallpaper',
+                  color: _wallpaperSwatchColor,
+                  icon: Icons.auto_awesome_rounded,
+                  selected: dynamicAccent,
+                  onTap: _useWallpaperAccent,
+                ),
               for (final (label, color) in TalonAccents.presets)
                 _AccentSwatch(
                   tooltip: label,
                   color: color,
-                  selected: seed != null && seed.toARGB32() == color.toARGB32(),
+                  selected: !dynamicAccent &&
+                      seed != null &&
+                      seed.toARGB32() == color.toARGB32(),
                   onTap: () => _setAccent(color),
                 ),
               _AccentSwatch(
@@ -1497,11 +1531,45 @@ class _SettingsScreenState extends State<SettingsScreen>
     );
   }
 
+  /// What the Wallpaper swatch should paint: the accent the palette would
+  /// derive from the system colour (so the swatch predicts the result rather
+  /// than showing the raw seed), or a neutral while it resolves.
+  Color get _wallpaperSwatchColor {
+    final seed = _wallpaperAccent;
+    if (seed == null) return TalonColors.surfaceHi;
+    return TalonAccents.derive(TalonTheme.palette, seed).accent;
+  }
+
   void _setAccent(Color? seed) {
     Haptics.selection();
     // main.dart listens on accentSeed → re-applies the palette and rebuilds.
     TalonTheme.accentSeed.value = seed;
     widget.state.prefs.setAccentSeed(seed?.toARGB32());
+    // Any manual pick leaves the follow-the-system mode.
+    if (widget.state.prefs.accentDynamic) {
+      widget.state.prefs.setAccentDynamic(false);
+      setState(() {});
+    }
+  }
+
+  /// Follow the platform's own colour. The seed is resolved once here and
+  /// re-read on every app resume (main.dart), so a new wallpaper re-tints the
+  /// app the next time it comes forward.
+  Future<void> _useWallpaperAccent() async {
+    Haptics.selection();
+    final messenger = ScaffoldMessenger.of(context);
+    final seed = await DynamicAccent.seed();
+    if (!mounted) return;
+    if (seed == null) {
+      messenger.showSnackBar(const SnackBar(
+        content: Text('This device does not expose a system colour'),
+      ));
+      return;
+    }
+    await widget.state.prefs.setAccentDynamic(true);
+    await widget.state.prefs.setAccentSeed(seed.toARGB32());
+    TalonTheme.accentSeed.value = seed;
+    if (mounted) setState(() {});
   }
 
   Future<void> _pickCustomAccent() async {
@@ -2843,7 +2911,7 @@ class _ModelRow extends StatelessWidget {
       builder: (ctx) => SizedBox(
         height: MediaQuery.of(ctx).size.height * 0.7,
         child: ListView(
-          padding: const EdgeInsets.all(12),
+          padding: EdgeInsets.fromLTRB(12, 12, 12, 12 + navInset(ctx)),
           children: [
             for (final m in state.models)
               ListTile(

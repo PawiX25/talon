@@ -332,12 +332,17 @@ export function createNativeFrontend(
    */
   async function computeContext(
     chatId: string,
+    opts?: { resolveModel?: boolean },
   ): Promise<ContextInfo | undefined> {
     try {
       const info = getSessionInfo(chatId);
       const u = info.usage;
       let ctxMax = u.contextWindow;
-      if (!ctxMax) {
+      // The model fallback touches the backend pool, which is fine for one
+      // chat the user just opened and wrong for every chat at boot — the
+      // startup warm asks for the cheap path and lets anything it can't
+      // resolve fill in when that chat is next opened.
+      if (!ctxMax && opts?.resolveModel !== false) {
         try {
           const backend = getBackendForChat(chatId);
           const backendId = getBackendIdForChat(chatId);
@@ -371,13 +376,36 @@ export function createNativeFrontend(
   }
 
   /** Recompute a chat's context fill and, if it changed, push it to clients. */
-  async function refreshContext(entry: ChatEntry): Promise<void> {
-    const next = await computeContext(entry.id);
+  async function refreshContext(
+    entry: ChatEntry,
+    opts?: { resolveModel?: boolean },
+  ): Promise<void> {
+    const next = await computeContext(entry.id, opts);
     if (!next) return;
     const prev = contextByChat.get(entry.id);
     if (prev && prev.used === next.used && prev.max === next.max) return;
     contextByChat.set(entry.id, next);
     broadcastChatUpdated(entry);
+  }
+
+  /**
+   * Fill the context cache for chats restored at startup.
+   *
+   * The readout is served from an in-memory map that was only ever written at
+   * turn end, so after a restart every existing chat reported no context at
+   * all — the header chip vanished until that chat ran another turn, which
+   * read as "context usage doesn't save". The numbers themselves are
+   * persisted with the session; only the cache was cold. This re-reads them
+   * for the most recently active chats (bounded, and on the cheap path that
+   * never touches the backend pool); anything it skips or can't resolve is
+   * filled in the moment the chat is opened.
+   */
+  const CONTEXT_WARM_LIMIT = 40;
+
+  async function warmContextCache(): Promise<void> {
+    for (const entry of chats.list().slice(0, CONTEXT_WARM_LIMIT)) {
+      await refreshContext(entry, { resolveModel: false });
+    }
   }
 
   const broadcast = (event: BridgeEvent): void => server.broadcast(event);
@@ -1006,6 +1034,34 @@ export function createNativeFrontend(
     }
   }
 
+  // ── Empty-chat sweeper ───────────────────────────────────────────────────
+  //
+  // "New chat" creates a real chat on the daemon the instant it's tapped, so
+  // opening one and backing out of it leaves an empty row in every client's
+  // list forever. The app deletes an untouched chat as soon as you leave it,
+  // which covers the normal case immediately; this is the backstop for the
+  // ones no client got to clean up — the app was killed, the network dropped,
+  // or the chat was created by something that never came back.
+  //
+  // Deliberately conservative: only chats that never carried a single message
+  // (see ChatEntry.used, which a reset does NOT clear), only after an hour,
+  // never one with a turn running or a message queued, and never one whose
+  // history says otherwise. Deleting via the same handler every client uses
+  // means the removal is broadcast, so open lists update in place.
+  const EMPTY_CHAT_MIN_AGE_MS = 60 * 60_000;
+  const EMPTY_CHAT_SWEEP_INTERVAL_MS = 30 * 60_000;
+  let emptyChatSweep: ReturnType<typeof setInterval> | null = null;
+
+  function sweepEmptyChats(): void {
+    for (const entry of chats.unused(EMPTY_CHAT_MIN_AGE_MS)) {
+      if (isBusy(entry.id) || queuedByChat.has(entry.id)) continue;
+      if (getRecentHistory(entry.id, 1).length > 0) continue;
+      if (handlers.deleteChat(entry.id)) {
+        log("native", `Swept empty chat ${entry.id}`);
+      }
+    }
+  }
+
   // ── Bridge server wiring ─────────────────────────────────────────────────
 
   const handlers: BridgeServerHandlers = {
@@ -1035,6 +1091,14 @@ export function createNativeFrontend(
       return ok;
     },
     history: (id, opts) => {
+      // Opening a chat is the one moment we know a client wants its numbers:
+      // refresh the context readout on the full path (model fallback and
+      // all), which covers every chat the startup warm skipped or couldn't
+      // resolve. Fire-and-forget — the figure arrives as a chat_updated.
+      const entry = chats.get(id);
+      if (entry && opts?.before === undefined) {
+        void refreshContext(entry).catch(() => {});
+      }
       const limit = Math.min(Math.max(opts?.limit ?? 200, 1), 500);
       const rows =
         opts?.before !== undefined
@@ -1292,6 +1356,19 @@ export function createNativeFrontend(
       const gatewayPort = await gateway.start(19876);
       log("native", `Gateway on :${gatewayPort}`);
       chats.restore();
+      // Non-blocking: a cold cache costs a missing chip, not a broken boot.
+      void warmContextCache().catch((err) =>
+        logError("native", "Context cache warm failed", err),
+      );
+      emptyChatSweep = setInterval(() => {
+        try {
+          sweepEmptyChats();
+        } catch (err) {
+          logError("native", "Empty-chat sweep failed", err);
+        }
+      }, EMPTY_CHAT_SWEEP_INTERVAL_MS);
+      // Housekeeping must never be the reason the process stays alive.
+      emptyChatSweep.unref?.();
       await server.start();
       const fingerprint = server.getFingerprint();
       // Tell the mesh how this bridge is reachable — everything a generated
@@ -1320,6 +1397,10 @@ export function createNativeFrontend(
     },
 
     async stop() {
+      if (emptyChatSweep) {
+        clearInterval(emptyChatSweep);
+        emptyChatSweep = null;
+      }
       unregisterMeshTransport?.();
       unregisterMeshTransport = null;
       mesh.setBridgeInfo(null);

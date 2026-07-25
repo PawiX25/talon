@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
+import '../services/haptics.dart';
 import '../theme.dart';
 
 /// Result of an image upload: the relative render path + on-disk path.
@@ -123,6 +124,10 @@ class _ComposerState extends State<Composer> {
     if ((text.isEmpty && bytes == null) || !widget.enabled || _uploading) {
       return;
     }
+    // A send is the one irreversible thing this control does: acknowledge it
+    // in the hand, the same way the FAB and long-presses do. Silent on
+    // desktop (the engine no-ops) and gated by the Settings haptics switch.
+    Haptics.selection();
     final name = _pendingName ?? 'image.jpg';
     _controller.clear();
     setState(() {
@@ -237,7 +242,8 @@ class _ComposerState extends State<Composer> {
                       maxLines: 6,
                       textInputAction: TextInputAction.newline,
                       keyboardType: TextInputType.multiline,
-                      style: const TextStyle(fontSize: 14.5, height: 1.4),
+                      style: TextStyle(
+                          fontSize: TalonDensity.d(14.5, 16), height: 1.4),
                       decoration: InputDecoration(
                         isCollapsed: true,
                         border: InputBorder.none,
@@ -352,7 +358,8 @@ class _AttachButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return IconButton(
       onPressed: enabled ? onTap : null,
-      icon: const Icon(Icons.add_photo_alternate_outlined, size: 20),
+      icon: Icon(Icons.add_photo_alternate_outlined,
+          size: TalonDensity.d(20, 23)),
       color: TalonColors.textDim,
       tooltip: 'Attach image',
     );
@@ -373,18 +380,19 @@ class _VoiceButton extends StatelessWidget {
       child: GestureDetector(
         onTap: onTap,
         child: Container(
-          width: 40,
-          height: 40,
+          width: TalonDensity.d(40, 46),
+          height: TalonDensity.d(40, 46),
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [TalonColors.accent, TalonColors.accentDeep],
             ),
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(TalonDensity.d(14, 16)),
             boxShadow: TalonShadows.glow,
           ),
-          child: const Icon(Icons.mic_rounded, color: Colors.white, size: 20),
+          child: Icon(Icons.mic_rounded,
+              color: Colors.white, size: TalonDensity.d(20, 22)),
         ),
       ),
     );
@@ -404,14 +412,15 @@ class _StopButton extends StatelessWidget {
     final button = GestureDetector(
       onTap: () => onTap(),
       child: Container(
-        width: 40,
-        height: 40,
+        width: TalonDensity.d(40, 46),
+        height: TalonDensity.d(40, 46),
         decoration: BoxDecoration(
           color: TalonColors.surfaceHi,
-          borderRadius: BorderRadius.circular(13),
+          borderRadius: BorderRadius.circular(TalonDensity.d(13, 15)),
           border: Border.all(color: TalonColors.glassStroke),
         ),
-        child: Icon(Icons.stop_rounded, color: TalonColors.text, size: 22),
+        child: Icon(Icons.stop_rounded,
+            color: TalonColors.text, size: TalonDensity.d(22, 24)),
       ),
     );
     return Tooltip(
@@ -468,8 +477,8 @@ class _SendButtonState extends State<_SendButton> {
         child: AnimatedContainer(
           duration: TalonMotion.base,
           curve: TalonMotion.standard,
-          width: 40,
-          height: 40,
+          width: TalonDensity.d(40, 46),
+          height: TalonDensity.d(40, 46),
           decoration: BoxDecoration(
             gradient: colored
                 ? LinearGradient(
@@ -479,7 +488,7 @@ class _SendButtonState extends State<_SendButton> {
                   )
                 : null,
             color: colored ? null : TalonColors.surfaceHi,
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(TalonDensity.d(14, 16)),
             boxShadow: colored ? TalonShadows.glow : null,
           ),
           child: busy
@@ -493,7 +502,7 @@ class _SendButtonState extends State<_SendButton> {
               : Icon(
                   Icons.arrow_upward_rounded,
                   color: colored ? Colors.white : TalonColors.textFaint,
-                  size: 20,
+                  size: TalonDensity.d(20, 22),
                 ),
         ),
       ),

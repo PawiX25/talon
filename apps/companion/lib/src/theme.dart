@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -153,12 +154,18 @@ class TalonAccents {
 
   /// Preset seeds. The derivation below adapts each one per brightness, so a
   /// single color works on both the near-black and paper-white canvases.
+  /// Nine of them, which — with the default, the system-colour swatch and the
+  /// custom picker — makes twelve tiles: a count that divides evenly by 2, 3,
+  /// 4 and 6, so the swatch grid lands on equal rows at every width instead of
+  /// leaving a hole in the last one. Fuchsia is also the one gap the ramp had:
+  /// rose sits at ~340°, violet at ~260°, and nothing lived between them.
   static const List<(String, Color)> presets = [
     ('Cyan', Color(0xFF38C8F0)),
     ('Emerald', Color(0xFF3ED598)),
     ('Lime', Color(0xFFA3E635)),
     ('Amber', Color(0xFFF5A524)),
     ('Rose', Color(0xFFFF5C8A)),
+    ('Fuchsia', Color(0xFFE879F9)),
     ('Violet', Color(0xFFA78BFA)),
     ('Flame', Color(0xFFFF7A59)),
     ('Graphite', Color(0xFF9BA3B5)),
@@ -288,6 +295,50 @@ class TalonColors {
   static LinearGradient get accentGradient => TalonTheme.palette.accentGradient;
 }
 
+/// Input density — the one switch that separates the phone from the desktop.
+///
+/// The app was originally tuned at a pointer's reading distance: 13.5px tile
+/// titles, 11.5px previews, 34px avatars, 36px controls. That rhythm is
+/// correct with a mouse 60cm away and wrong in a hand — Material's touch
+/// guidance asks for a 48dp minimum target and a body size around 15–16sp,
+/// and iOS HIG says the same in different units. Rather than fork the widget
+/// tree, every size that matters is expressed as a pair here and resolved
+/// once: [d] picks the pointer value on desktop and the touch value on a
+/// phone or tablet.
+///
+/// [overrideTouch] pins the mode for tests and the screenshot gallery, which
+/// run under a forced Android target platform and would otherwise render the
+/// desktop screens at phone density.
+class TalonDensity {
+  TalonDensity._();
+
+  /// Test/gallery override. Null = derive from the platform.
+  static bool? overrideTouch;
+
+  static bool get touch =>
+      overrideTouch ??
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
+  /// Pick between a [pointer] value and a [finger] value.
+  static double d(double pointer, double finger) => touch ? finger : pointer;
+
+  /// Minimum interactive edge: Material's 48dp touch target on a phone, the
+  /// tighter desktop hit box with a mouse.
+  static double get tap => touch ? 48 : 36;
+}
+
+/// The system navigation bar's height at the bottom of this screen (0 where
+/// there isn't one — desktop, or a device with hardware keys).
+///
+/// Phone surfaces run edge-to-edge: content scrolls UNDER the bar, because
+/// Android draws it transparent over the app and stopping short of it leaves
+/// a dead band. The cost is that every scrolling surface has to add this to
+/// its bottom padding, so the last row can still be scrolled clear of the
+/// gesture pill. Uses `padding` rather than `viewPadding` on purpose: with
+/// the keyboard up the bar is behind it, and the inset is genuinely gone.
+double navInset(BuildContext context) => MediaQuery.of(context).padding.bottom;
+
 /// Spacing scale — an 8pt grid (with a 2/4 half-step for tight insets). Snap
 /// every padding/gap to one of these so the layout reads as a system rather
 /// than a pile of hand-tuned magic numbers.
@@ -327,7 +378,7 @@ class TalonType {
 
   static TextStyle get display => TextStyle(
         fontFamily: _fontFamily,
-        fontSize: 22,
+        fontSize: TalonDensity.d(22, 24),
         height: 1.2,
         fontWeight: FontWeight.w700,
         letterSpacing: -0.4,
@@ -336,7 +387,7 @@ class TalonType {
 
   static TextStyle get title => TextStyle(
         fontFamily: _fontFamily,
-        fontSize: 16,
+        fontSize: TalonDensity.d(16, 17),
         height: 1.3,
         fontWeight: FontWeight.w700,
         letterSpacing: -0.2,
@@ -345,7 +396,7 @@ class TalonType {
 
   static TextStyle get subtitle => TextStyle(
         fontFamily: _fontFamily,
-        fontSize: 14,
+        fontSize: TalonDensity.d(14, 15),
         height: 1.3,
         fontWeight: FontWeight.w600,
         color: TalonColors.text,
@@ -353,21 +404,21 @@ class TalonType {
 
   static TextStyle get body => TextStyle(
         fontFamily: _fontFamily,
-        fontSize: 14,
+        fontSize: TalonDensity.d(14, 15.5),
         height: 1.5,
         color: TalonColors.text,
       );
 
   static TextStyle get label => TextStyle(
         fontFamily: _fontFamily,
-        fontSize: 13,
+        fontSize: TalonDensity.d(13, 14),
         height: 1.3,
         color: TalonColors.textDim,
       );
 
   static TextStyle get caption => TextStyle(
         fontFamily: _fontFamily,
-        fontSize: 12,
+        fontSize: TalonDensity.d(12, 12.5),
         height: 1.4,
         color: TalonColors.textFaint,
       );
@@ -375,7 +426,7 @@ class TalonType {
   /// All-caps section eyebrow (sidebar groups, settings section headers).
   static TextStyle get eyebrow => TextStyle(
         fontFamily: _fontFamily,
-        fontSize: 11,
+        fontSize: TalonDensity.d(11, 11.5),
         height: 1.2,
         fontWeight: FontWeight.w700,
         letterSpacing: 1.1,
@@ -385,7 +436,7 @@ class TalonType {
   /// Monospace for tool names, code, tabular readouts.
   static TextStyle get mono => TextStyle(
         fontFamily: 'JetBrains Mono',
-        fontSize: 13,
+        fontSize: TalonDensity.d(13, 13.5),
         height: 1.4,
         color: TalonColors.text,
       );
@@ -527,6 +578,12 @@ ThemeData buildTalonTheme() {
       ),
     ),
     dividerColor: TalonColors.glassStroke,
+    // Bottom sheets are a touch surface first: give the drag handle the
+    // palette's faint ink so it reads on both canvases.
+    bottomSheetTheme: base.bottomSheetTheme.copyWith(
+      dragHandleColor: TalonColors.textFaint,
+      dragHandleSize: const Size(36, 4),
+    ),
     iconTheme: IconThemeData(color: TalonColors.textDim, size: 20),
     tooltipTheme: TooltipThemeData(
       decoration: BoxDecoration(

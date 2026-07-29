@@ -659,6 +659,21 @@ describe("createTelegramActionHandler", () => {
     expect(api.sendMessage.mock.calls[1]![1]).toBe("<b>two</b>");
   });
 
+  it("send_message keeps fenced code on the Rich path", async () => {
+    // One renderer for everything: delivery must not branch on message
+    // content. Telegram owns markdown parsing, including code blocks.
+    const text = "here:\n```ts\nconst x = 1;\n```";
+
+    await handler({ action: "send_message", text }, chatId);
+
+    expect(api.sendRichMessage).toHaveBeenCalledWith(
+      chatId,
+      { markdown: text },
+      expect.any(Object),
+    );
+    expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("send_message_with_buttons keeps the inline keyboard on the Rich path", async () => {
     const result = await handler(
       {

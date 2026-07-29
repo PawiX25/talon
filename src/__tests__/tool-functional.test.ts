@@ -349,6 +349,7 @@ import {
   createTelegramActionHandler,
   // re-export for test side-only — handler depends on the InputFile constructor
 } from "../frontend/telegram/actions/index.js";
+import { resetRichMessageSupport } from "../frontend/telegram/actions/shared.js";
 import type { Bot } from "grammy";
 import type { Gateway } from "../core/engine/gateway.js";
 
@@ -360,6 +361,7 @@ interface BotApiSpy {
   unpinChatMessage: ReturnType<typeof vi.fn>;
   forwardMessage: ReturnType<typeof vi.fn>;
   copyMessage: ReturnType<typeof vi.fn>;
+  sendRichMessage: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
   sendChatAction: ReturnType<typeof vi.fn>;
 }
@@ -373,6 +375,7 @@ function makeBotSpy(): { bot: Bot; api: BotApiSpy } {
     unpinChatMessage: vi.fn(async () => true),
     forwardMessage: vi.fn(async () => ({ message_id: 999 })),
     copyMessage: vi.fn(async () => ({ message_id: 1000 })),
+    sendRichMessage: vi.fn(async () => ({ message_id: 1001 })),
     sendMessage: vi.fn(async () => ({ message_id: 1001 })),
     sendChatAction: vi.fn(async () => true),
   };
@@ -407,6 +410,9 @@ describe("createTelegramActionHandler", () => {
   const chatId = 12345;
 
   beforeEach(() => {
+    // The Rich-Message capability probe latches process-wide; re-arm it so a
+    // test that simulates an old Bot API server can't leak into the next one.
+    resetRichMessageSupport();
     const spy = makeBotSpy();
     bot = spy.bot;
     api = spy.api;
@@ -525,7 +531,7 @@ describe("createTelegramActionHandler", () => {
     expect(result).toEqual({ ok: true, message_id: 1000 });
   });
 
-  it("edit_message → bot.api.editMessageText(chatId, message_id, html, opts)", async () => {
+  it("edit_message → bot.api.editMessageText with native Rich Markdown", async () => {
     await handler(
       { action: "edit_message", message_id: 2081, text: "**bold**" },
       chatId,
@@ -535,8 +541,7 @@ describe("createTelegramActionHandler", () => {
     const call = api.editMessageText.mock.calls[0]!;
     expect(call[0]).toBe(chatId);
     expect(call[1]).toBe(2081);
-    expect(typeof call[2]).toBe("string");
-    expect(call[3]).toEqual({ parse_mode: "HTML" });
+    expect(call[2]).toEqual({ markdown: "**bold**" });
   });
 
   it("edit_message rejects text > TELEGRAM_MAX_TEXT (4096)", async () => {
@@ -561,7 +566,7 @@ describe("createTelegramActionHandler", () => {
     expect(api.sendChatAction).toHaveBeenCalledWith(chatId, "typing");
   });
 
-  it("send_message → withRetry → bot.api.sendMessage with HTML and reply_to", async () => {
+  it("send_message → bot.api.sendRichMessage with Markdown and reply_to", async () => {
     const result = await handler(
       {
         action: "send_message",
@@ -571,14 +576,14 @@ describe("createTelegramActionHandler", () => {
       chatId,
     );
 
-    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(api.sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage).not.toHaveBeenCalled();
     expect(gateway.incrementMessages).toHaveBeenCalledWith(chatId);
-    const call = api.sendMessage.mock.calls[0]!;
+    const call = api.sendRichMessage.mock.calls[0]!;
     expect(call[0]).toBe(chatId);
-    expect(typeof call[1]).toBe("string");
+    expect(call[1]).toEqual({ markdown: "hello" });
     expect(call[2]).toMatchObject({
       reply_parameters: { message_id: 2081 },
-      parse_mode: "HTML",
     });
     expect(result).toEqual({ ok: true, message_id: 1001 });
   });
@@ -595,10 +600,102 @@ describe("createTelegramActionHandler", () => {
       },
       chatId,
     );
-    const call = api.sendMessage.mock.calls[0]!;
+    const call = api.sendRichMessage.mock.calls[0]!;
     expect(call[2]).toMatchObject({
       reply_parameters: { message_id: 2081 },
     });
+  });
+
+  it("send_message passes URL asterisks untouched to native Rich Markdown", async () => {
+    const text =
+      "[song](https://chomikuj.pl/Jak+Si*c4*99+Bawi*c4*85+Ludzie.mp3)";
+
+    await handler({ action: "send_message", text }, chatId);
+
+    expect(api.sendRichMessage).toHaveBeenCalledWith(
+      chatId,
+      { markdown: text },
+      expect.any(Object),
+    );
+    expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("send_message falls back to legacy HTML when a Rich Message is rejected", async () => {
+    api.sendRichMessage.mockRejectedValueOnce(
+      new Error("Bad Request: can't parse rich message"),
+    );
+
+    const result = await handler(
+      { action: "send_message", text: "**still formatted**" },
+      chatId,
+    );
+
+    expect(api.sendMessage).toHaveBeenCalledWith(
+      chatId,
+      "<b>still formatted</b>",
+      expect.objectContaining({ parse_mode: "HTML" }),
+    );
+    expect(result).toEqual({ ok: true, message_id: 1001 });
+
+    // A payload-level rejection must NOT disable the capability: the next
+    // send still tries native Rich Markdown first.
+    await handler({ action: "send_message", text: "second" }, chatId);
+    expect(api.sendRichMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("send_message stops attempting Rich Messages once the method is unsupported", async () => {
+    api.sendRichMessage.mockRejectedValueOnce(
+      new Error("Bad Request: method not found"),
+    );
+
+    await handler({ action: "send_message", text: "**one**" }, chatId);
+    expect(api.sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+
+    // Capability latched off — no second doomed round-trip.
+    await handler({ action: "send_message", text: "**two**" }, chatId);
+    expect(api.sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage).toHaveBeenCalledTimes(2);
+    expect(api.sendMessage.mock.calls[1]![1]).toBe("<b>two</b>");
+  });
+
+  it("send_message_with_buttons keeps the inline keyboard on the Rich path", async () => {
+    const result = await handler(
+      {
+        action: "send_message_with_buttons",
+        text: "**pick one**",
+        rows: [[{ text: "A", callback_data: "a" }]],
+      },
+      chatId,
+    );
+
+    expect(api.sendRichMessage).toHaveBeenCalledWith(
+      chatId,
+      { markdown: "**pick one**" },
+      expect.objectContaining({
+        reply_markup: {
+          inline_keyboard: [[{ text: "A", callback_data: "a" }]],
+        },
+      }),
+    );
+    expect(result).toEqual({ ok: true, message_id: 1001 });
+  });
+
+  it("edit_message falls back to legacy HTML when the Rich edit is rejected", async () => {
+    api.editMessageText
+      .mockRejectedValueOnce(new Error("Bad Request: can't parse rich message"))
+      .mockResolvedValueOnce(true);
+
+    const result = await handler(
+      { action: "edit_message", message_id: 2081, text: "**bold**" },
+      chatId,
+    );
+
+    expect(api.editMessageText).toHaveBeenCalledTimes(2);
+    const fallback = api.editMessageText.mock.calls[1]!;
+    expect(fallback[2]).toBe("<b>bold</b>");
+    expect(fallback[3]).toEqual({ parse_mode: "HTML" });
+    expect(result).toEqual({ ok: true });
   });
 
   it("schedule_message returns a schedule id and keeps a timer", async () => {

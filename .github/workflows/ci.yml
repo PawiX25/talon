@@ -597,10 +597,68 @@ jobs:
         with:
           workspaces: native/talon-fusefs
 
-      - name: Host can mount (fail loudly, never skip silently)
+      # A version banner is not a mount. The old check only proved
+      # /dev/fuse existed and fusermount3 could print --version, so a
+      # runner that had lost the *permission* to mount still walked past
+      # it and surfaced as an opaque assertion failure in the live suite
+      # (2026-07-29: "fusermount3: mount failed: Operation not permitted"
+      # on ubuntu-latest, with this step green). Probe the capability
+      # itself, and print the state a human needs to tell an environment
+      # regression from a code regression.
+      #
+      # The cause, found by this probe on 2026-07-30: GitHub's runner
+      # fleet is not uniform. Some images carry a self-built libfuse in
+      # /usr/local/bin, which precedes /usr/bin on PATH:
+      #
+      #   passing runner: /usr/bin/fusermount3        3.14.0  -rwsr-xr-x root
+      #   failing runner: /usr/local/bin/fusermount3  3.18.2  -rwxrwxrwx runner
+      #
+      # An unprivileged user cannot mount FUSE through a fusermount3 that
+      # is not setuid root — the kernel refuses, and libfuse reports it as
+      # "Operation not permitted". fuser is built default-features = false,
+      # so it shells out to whichever fusermount3 PATH resolves; land on an
+      # image with the impostor and the mount cannot succeed. Nothing
+      # intermittent about it, and nothing to do with AppArmor: the
+      # apparmor_restrict_unprivileged_userns knob is 1 on both, and
+      # A/B-ing it (same commit, job matrixed over setting it to 0) passed
+      # on both legs. Don't reintroduce that workaround.
+      #
+      # So: probe, then guarantee. If the resolved binary isn't setuid
+      # root, put the system one back in front rather than failing on a
+      # runner that is perfectly capable of mounting.
+      - name: Host FUSE capability (probe, then guarantee setuid fusermount3)
         run: |
+          set -x
           test -e /dev/fuse
-          fusermount3 --version || fusermount --version
+          ls -l /dev/fuse
+          id
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          aa-enabled 2>/dev/null || true
+
+          set +x
+          resolved="$(command -v fusermount3 || command -v fusermount || true)"
+          if [ -z "$resolved" ]; then
+            echo "::error::no fusermount3/fusermount on PATH"
+            exit 1
+          fi
+          echo "resolved: $resolved"
+          ls -l "$resolved"
+          "$resolved" --version || true
+
+          setuid_root() {
+            [ -u "$1" ] && [ "$(stat -c %u "$1")" = "0" ]
+          }
+
+          if setuid_root "$resolved"; then
+            echo "ok: $resolved is setuid root"
+          elif setuid_root /usr/bin/fusermount3; then
+            echo "::warning::$resolved is $(stat -c '%A %U:%G' "$resolved"), not setuid root; prepending /usr/bin so the setuid system binary wins"
+            echo "/usr/bin" >> "$GITHUB_PATH"
+            ls -l /usr/bin/fusermount3
+          else
+            echo "::error::no setuid-root fusermount3 on this host ($resolved is $(stat -c '%A %U:%G' "$resolved")). An unprivileged FUSE mount cannot succeed: runner-image problem, not a code regression."
+            exit 1
+          fi
 
       - name: Unit tests (pinned toolchain via rust-toolchain.toml)
         run: cargo test --locked

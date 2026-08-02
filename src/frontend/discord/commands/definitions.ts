@@ -15,8 +15,9 @@
 import { type Client, REST, Routes, SlashCommandBuilder } from "discord.js";
 import type { TalonConfig } from "../../../util/config.js";
 import { log, logError, logWarn } from "../../../util/log.js";
+import { getRepoRoot } from "../../../core/update/self-update.js";
 
-export function buildCommandDefinitions(): unknown[] {
+export function buildCommandDefinitions(devBuild = false): unknown[] {
   return [
     new SlashCommandBuilder()
       .setName("start")
@@ -98,6 +99,36 @@ export function buildCommandDefinitions(): unknown[] {
       .setDescription("List loaded plugins")
       .toJSON(),
     new SlashCommandBuilder()
+      .setName("doctor")
+      .setDescription("Environment and native-module health (admin)")
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("mesh")
+      .setDescription("Ping and list mesh devices")
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("soul")
+      .setDescription("Inspect the compiled identity")
+      .addStringOption((o) =>
+        o
+          .setName("action")
+          .setDescription("Leave empty to introspect")
+          .setRequired(false)
+          .addChoices({ name: "dream", value: "dream" }),
+      )
+      .toJSON(),
+    // /update only exists on developer builds running from a git checkout —
+    // a packaged binary has no source tree to pull into, so the command is
+    // never registered there (same gate as the Telegram handler).
+    ...(devBuild && getRepoRoot()
+      ? [
+          new SlashCommandBuilder()
+            .setName("update")
+            .setDescription("Pull latest, reinstall, restart (admin)")
+            .toJSON(),
+        ]
+      : []),
+    new SlashCommandBuilder()
       .setName("admin")
       .setDescription("Admin operations (admin only)")
       .addStringOption((o) =>
@@ -128,7 +159,7 @@ export async function registerCommandsForGuilds(
 ): Promise<void> {
   const dc = config.discord!;
   const rest = new REST({ version: "10" }).setToken(dc.botToken);
-  const definitions = buildCommandDefinitions();
+  const definitions = buildCommandDefinitions(config.devBuild);
 
   // Step 1: clear or set global commands depending on DM setting.
   try {

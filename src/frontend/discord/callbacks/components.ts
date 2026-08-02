@@ -68,6 +68,7 @@ import {
   DISCORD_MAX_TEXT,
 } from "../formatting.js";
 import { chatIdFromInteraction, type ComponentInteraction } from "./shared.js";
+import { metricsViewRow, renderMetricsView } from "../commands/admin.js";
 
 export async function handleComponentInteraction(
   interaction: ComponentInteraction,
@@ -348,6 +349,21 @@ export async function handleComponentInteraction(
       } catch {
         /* ignore */
       }
+    }
+    return;
+  }
+
+  // ── /metrics today ↔ all-time toggle ────────────────────────────────────
+  if (customId === "metrics:today" || customId === "metrics:all") {
+    const view = customId === "metrics:all" ? "all" : "today";
+    const messages = renderMetricsView(view);
+    try {
+      await interaction.update({
+        content: messages[0]!,
+        components: [metricsViewRow(view).toJSON()],
+      });
+    } catch {
+      /* ignore */
     }
     return;
   }

@@ -7,8 +7,10 @@ import {
   type Client,
   MessageFlags,
 } from "discord.js";
-import { formatDuration } from "../helpers.js";
+import { formatDuration, renderMeshReport } from "../helpers.js";
 import { getLoadedPlugins } from "../../../core/plugin/index.js";
+import { getMeshService } from "../../../core/mesh/index.js";
+import type { MeshPingResult } from "../../../core/mesh/service.js";
 import { reply } from "./shared.js";
 
 export async function handleStart(
@@ -65,6 +67,21 @@ export async function handleHelp(
     ].join("\n"),
     true,
   );
+}
+
+export async function handleMesh(
+  i: ChatInputCommandInteraction,
+): Promise<void> {
+  await i.deferReply({ flags: MessageFlags.Ephemeral });
+  await i.editReply("Pinging mesh devices…");
+  let results: MeshPingResult[];
+  try {
+    results = await getMeshService().pingAll();
+  } catch {
+    await i.editReply("Could not reach the mesh service.");
+    return;
+  }
+  await i.editReply(renderMeshReport(results));
 }
 
 export async function handlePing(

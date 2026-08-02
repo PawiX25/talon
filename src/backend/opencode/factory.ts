@@ -66,21 +66,8 @@ const opencodeFactory: BackendFactory = {
       // Catalog-driven backend with no canonical default.
       getDefaultModelId: () => undefined,
       getRawModelInfo: (id) => ocGetModelInfo(id),
-      getSettingsPresentation: async (m, options) => {
-        const inner = await ocGetSettingsPresentation(
-          m,
-          options?.callbackPrefix,
-        );
-        return {
-          ...inner,
-          view: "models" as const,
-          page: 1,
-          totalPages: 1,
-          filter: "all" as const,
-          freeCount: 0,
-          totalCount: inner.modelButtons.length,
-        };
-      },
+      getSettingsPresentation: (m, options) =>
+        ocGetSettingsPresentation(m, options),
       getProviders: () => ocGetProviders(),
       getProviderModels: (p, pg, ps) => ocGetProviderModels(p, pg, ps),
       formatModelError: (q, r) => ocFormatModelError(q, r),

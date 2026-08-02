@@ -24,6 +24,7 @@ import {
 import { shutdownTriggers } from "./core/background/triggers/index.js";
 import { pruneSettledTriggers } from "./storage/trigger-store.js";
 import { startWatchdog, stopWatchdog } from "./util/watchdog.js";
+import { spawnSuccessor } from "./util/respawn.js";
 import { log, logError, logWarn } from "./util/log.js";
 import {
   getVfs,
@@ -121,6 +122,14 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   const forceTimer = setTimeout(() => {
     logError("shutdown", "Timeout exceeded, forcing exit");
+    // Hand off even on the forced path. A restart must survive a
+    // subsystem that won't stop (a wedged FUSE unmount, an MCP server
+    // ignoring SIGTERM, a backend child that never acks): without this
+    // the timeout exits without a successor and `/restart` silently
+    // takes the daemon down for good. The successor may briefly race
+    // the long-poll we failed to release, but grammy retries the 409 —
+    // a few seconds of overlap beats staying down.
+    spawnSuccessor();
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS);
   forceTimer.unref();
@@ -181,11 +190,15 @@ async function gracefulShutdown(signal: string): Promise<void> {
     await shutdownHub();
   });
   flushDatabase();
-  // Guarded removal: after a /restart handoff the successor has already
-  // written its own pid here — deleting unconditionally would orphan it
-  // (the bug that made `talon restart` spawn duplicate daemons).
+  // Guarded removal: only clear the record if it still names us. A
+  // successor that raced ahead and wrote its own pid here must not be
+  // orphaned (the bug that made `talon restart` spawn duplicate daemons).
   removePidRecordIfOwnedBy(process.pid);
   log("shutdown", "State saved");
+  // Hand off last: the frontends are stopped, so the successor binds
+  // Telegram's long-poll only after we have released it. No-op unless
+  // /restart or /update armed a respawn.
+  spawnSuccessor();
   process.exit(0);
 }
 

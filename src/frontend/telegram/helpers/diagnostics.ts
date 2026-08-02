@@ -211,11 +211,20 @@ const DOCTOR_ICONS: Record<string, string> = {
 export function renderDoctorMessage(report: DoctorReport): string {
   const lines = ["<b>🩺 Talon Doctor</b>", "", "<b>Environment</b>"];
 
-  for (const check of report.checks) {
+  const render = (check: DoctorReport["checks"][number]): string => {
     const detail = check.detail ? ` (${escapeHtml(check.detail)})` : "";
-    lines.push(
-      `${DOCTOR_ICONS[check.status]} ${escapeHtml(check.label)}${detail}`,
-    );
+    return `${DOCTOR_ICONS[check.status]} ${escapeHtml(check.label)}${detail}`;
+  };
+
+  for (const check of report.checks.filter((c) => !c.inactive)) {
+    lines.push(render(check));
+  }
+
+  // Configured-but-idle backends get their own block: they describe what a
+  // switch would run into, not the state of the running deployment.
+  const idle = report.checks.filter((c) => c.inactive);
+  if (idle.length > 0) {
+    lines.push("", "<b>Other backends</b>", ...idle.map(render));
   }
 
   lines.push("", "<b>Native modules</b>");

@@ -69,25 +69,8 @@ const kiloFactory: BackendFactory = {
       // through to `config.backendDefaults.kilo`.
       getDefaultModelId: () => undefined,
       getRawModelInfo: (id) => kiloGetModelInfo(id),
-      getSettingsPresentation: async (m, options) => {
-        // Kilo's internal helper returns the bare picker shape;
-        // wrap into the canonical `ModelPickerResult`. Kilo doesn't
-        // expose pagination or a free-tier filter so the result is
-        // always page 1 of 1 with filter "all".
-        const inner = await kiloGetSettingsPresentation(
-          m,
-          options?.callbackPrefix,
-        );
-        return {
-          ...inner,
-          view: "models" as const,
-          page: 1,
-          totalPages: 1,
-          filter: "all" as const,
-          freeCount: 0,
-          totalCount: inner.modelButtons.length,
-        };
-      },
+      getSettingsPresentation: (m, options) =>
+        kiloGetSettingsPresentation(m, options),
       getProviders: () => kiloGetProviders(),
       getProviderModels: (p, pg, ps) => kiloGetProviderModels(p, pg, ps),
       formatModelError: (q, r) => kiloFormatModelError(q, r),
